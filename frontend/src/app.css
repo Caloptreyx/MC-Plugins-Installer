@@ -1,0 +1,17 @@
+/* Plugin descriptions come from Modrinth / CurseForge and embed wide images. */
+.mcpi-rich-text {
+  overflow-wrap: anywhere;
+}
+
+.mcpi-rich-text img {
+  max-width: 100%;
+  height: auto;
+}
+
+.mcpi-link {
+  cursor: pointer;
+}
+
+.mcpi-link:hover {
+  text-decoration: underline;
+}

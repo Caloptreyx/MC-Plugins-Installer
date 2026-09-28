@@ -1,0 +1,19 @@
+import { faPlug } from '@fortawesome/free-solid-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { Avatar } from '@mantine/core';
+
+export default function PluginIcon({
+  url,
+  name,
+  size = 64,
+}: {
+  url: string | null | undefined;
+  name: string;
+  size?: number;
+}) {
+  return (
+    <Avatar src={url ?? null} alt={name} size={size} radius='md' color='gray' variant='light'>
+      <FontAwesomeIcon icon={faPlug} size={size >= 64 ? 'xl' : 'lg'} />
+    </Avatar>
+  );
+}

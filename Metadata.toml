@@ -1,0 +1,3 @@
+package_name = "dev.caloptreyx.mcplugins"
+name = "MC Plugins Installer"
+panel_version = ">=1.2.2"
