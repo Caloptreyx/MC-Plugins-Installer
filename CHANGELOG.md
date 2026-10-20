@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- Works with Calagopus Panel 1.2.6, which changed how the panel renders Markdown. Plugin descriptions still render
+  their HTML (sanitized) with the panel's own styling and safe links.
+- Requires Calagopus Panel 1.2.6 or newer.
+
 ## 1.1.0
 
 - Added CurseForge as a plugin source: browse, view, install and switch versions of CurseForge Bukkit plugins.

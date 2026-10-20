@@ -78,7 +78,7 @@ extension's backend. Without a key only Modrinth is offered.
 
 ## Requirements
 
-Calagopus Panel **1.2.2** or newer. There are no database migrations.
+Calagopus Panel **1.2.6** or newer. There are no database migrations.
 
 ## Installation
 

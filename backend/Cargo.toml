@@ -2,7 +2,7 @@
 name = "dev_caloptreyx_mcplugins"
 description = "Browse, install and manage Minecraft server plugins from Modrinth and CurseForge."
 authors = ["Caloptreyx"]
-version = "1.1.0"
+version = "1.1.1"
 edition = { workspace = true }
 
 [dependencies]
