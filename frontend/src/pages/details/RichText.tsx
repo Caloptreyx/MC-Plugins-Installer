@@ -13,11 +13,7 @@ export default function RichText({ content, format }: { content: string; format:
 
   return (
     <div className='mcpi-rich-text'>
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, rehypeSanitize]}
-        components={markdownComponents}
-      >
+      <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={markdownComponents}>
         {source}
       </Markdown>
     </div>
