@@ -16,7 +16,8 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-url = { workspace = true }
+# panel 1.2.10 dropped `url` from its workspace dependencies; 2.5 is in every panel's lockfile
+url = "2.5"
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 uuid = { workspace = true }
