@@ -16,12 +16,12 @@ import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import FormattedTimestamp from '@/elements/time/FormattedTimestamp.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import { bytesToString } from '@/lib/format/size.ts';
+import type { PluginVersion, VersionChannel } from '../../lib/catalog.ts';
+import type { InstalledPlugin } from '../../lib/plugins.ts';
 import ChannelBadge, { CHANNEL_LABELS } from '../../components/ChannelBadge.tsx';
 import LoaderBadge from '../../components/LoaderBadge.tsx';
-import type { PluginVersion, VersionChannel } from '../../lib/catalog.ts';
 import { formatCount, newestFirst } from '../../lib/format.ts';
 import { isPluginLoader, loaderSelectData, type PluginLoader, runsOn } from '../../lib/loaders.ts';
-import type { InstalledPlugin } from '../../lib/plugins.ts';
 import { useDetection } from '../../lib/queries.ts';
 
 const PER_PAGE = 15;

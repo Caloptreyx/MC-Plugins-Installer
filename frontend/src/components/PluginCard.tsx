@@ -8,9 +8,9 @@ import Card from '@/elements/data-display/Card.tsx';
 import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import FormattedTimestamp from '@/elements/time/FormattedTimestamp.tsx';
 import Text from '@/elements/typography/Text.tsx';
+import type { InstalledPlugin } from '../lib/plugins.ts';
 import { FOLLOW_LABELS, type PluginSummary } from '../lib/catalog.ts';
 import { formatCount, gameVersionRange } from '../lib/format.ts';
-import type { InstalledPlugin } from '../lib/plugins.ts';
 import LoaderBadge from './LoaderBadge.tsx';
 import PluginIcon from './PluginIcon.tsx';
 

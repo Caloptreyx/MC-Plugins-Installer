@@ -129,5 +129,5 @@ Before shipping, run from the panel checkout:
 
 ```bash
 cargo fmt && cargo clippy -p dev_caloptreyx_mcplugins
-cd frontend && pnpm biome:fix-unsafe && pnpm build:ci
+cd frontend && pnpm fmt && pnpm lint && pnpm build:ci
 ```

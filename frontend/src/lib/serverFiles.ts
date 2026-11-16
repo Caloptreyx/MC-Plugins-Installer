@@ -22,7 +22,7 @@ export async function listDirectory(uuid: string, directory: string): Promise<Di
 
 /** Runs `task` over `items` with at most `limit` in flight, preserving order. */
 export async function mapConcurrent<T, R>(items: readonly T[], limit: number, task: (item: T) => Promise<R>) {
-  const results = new Array<R>(items.length);
+  const results = Array.from<R>({ length: items.length });
   let next = 0;
   const worker = async () => {
     while (next < items.length) {
