@@ -67,6 +67,24 @@ needs `files.delete`. `startup.read` is used, when available, to read startup va
 The extension adds the admin permissions `mcplugins.read` (view the settings) and `mcplugins.manage` (change the
 CurseForge API key).
 
+## Screenshots
+
+**Browse**: Modrinth plugins matched to the detected Paper 1.21.4 server.
+
+![Browse tab with plugin results](docs/screenshots/browse.png)
+
+**Install modal**: loader and Minecraft version default to what was detected.
+
+![Install LuckPerms modal](docs/screenshots/install-modal.png)
+
+**Installed**: every jar in `plugins/`, identified by hash, with enable, switch version and delete.
+
+![Installed plugins list](docs/screenshots/installed.png)
+
+**Admin settings**: the optional CurseForge API key.
+
+![MC Plugins Installer admin settings](docs/screenshots/admin-settings.png)
+
 ## Setting up CurseForge
 
 1. Create an API key in the [CurseForge for Studios console](https://console.curseforge.com/).
