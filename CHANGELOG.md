@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Works with panel 1.2.11
+
 ## 1.1.2
 
 - Works with panel 1.2.10
