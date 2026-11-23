@@ -11,7 +11,7 @@ const PERMISSION = 'files.read-content';
 
 class McPluginsInstallerExtension extends Extension {
   public cardConfigurationPage: React.FC | null = AdminConfigPage;
-  public cardIcon: React.ReactNode = <FontAwesomeIcon icon={faPlug} />;
+  public cardIcon = <FontAwesomeIcon icon={faPlug} />;
 
   public initialize(ctx: ExtensionContext): void {
     ctx.extensionRegistry.enterRoutes((routes) =>
