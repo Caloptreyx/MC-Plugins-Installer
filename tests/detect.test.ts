@@ -446,6 +446,8 @@ describe('Freshness', () => {
       }),
     );
     assert.equal(result.logStale, true);
+    assert.deepEqual(result.staleSources, ['log']);
+    assert.ok(result.conflicts.some((entry) => entry.source === 'log' && entry.stale));
     assert.equal(result.software?.value, 'neoforge');
     assert.equal(result.minecraftVersion?.value, '1.21.1');
     assert.ok(result.evidence.some((entry) => entry.source === 'log'));
@@ -466,6 +468,16 @@ describe('Freshness', () => {
       }),
     );
     assert.equal(result.logStale, true);
+    assert.deepEqual(result.staleSources, ['log']);
+    assert.deepEqual(
+      result.conflicts.find((entry) => entry.source === 'log'),
+      {
+        source: 'log',
+        detail: '[12:00:00 INFO]: This server is running Paper version 1.20.4-496-release (MC: 1.20.4)',
+        value: 'Paper · 1.20.4 · 496',
+        stale: true,
+      },
+    );
     assert.deepEqual(result.software, { value: 'purpur', source: 'marker', confidence: 'medium' });
     assert.equal(result.minecraftVersion?.value, '1.21.4');
     assert.equal(result.loaderVersion?.value, '2416');
@@ -481,6 +493,60 @@ describe('Freshness', () => {
     );
     assert.deepEqual(result.software, { value: 'paper', source: 'log', confidence: 'low' });
     assert.equal(result.logStale, true);
+  });
+
+  test('a fresh Folia log and a stale branded version_history.json: only the history is stale, and it conflicts', () => {
+    const result = detect(
+      inputs({
+        root: [file('server.jar', 20), file('version_history.json', 10)],
+        config: [file('paper-global.yml', 30)],
+        logs: [file('latest.log', 30)],
+        log: log(
+          '[12:00:00 INFO]: [bootstrap] Loading Folia 1.21.4-6-main@abc (2025-01-01T00:00:00Z) for Minecraft 1.21.4\n',
+        ),
+        versionHistory: history('git-Paper-196 (MC: 1.20.1)'),
+      }),
+    );
+    assert.deepEqual(result.software, { value: 'folia', source: 'log', confidence: 'high' });
+    assert.equal(result.minecraftVersion?.value, '1.21.4');
+    assert.equal(result.loaderVersion?.value, '6');
+    assert.deepEqual(result.staleSources, ['version_history']);
+    assert.equal(result.logStale, true);
+    assert.deepEqual(result.conflicts, [
+      { source: 'version_history', detail: 'version_history.json', value: 'Paper · 1.20.1 · 196', stale: true },
+    ]);
+    // paper-global.yml is something Folia writes as well: not a conflict.
+    assert.ok(!result.conflicts.some((entry) => entry.source === 'files'));
+  });
+
+  test('an unbranded stale version_history.json conflicts only on the version and is not labelled Paper', () => {
+    const base = {
+      root: [file('server.jar', 20), file('version_history.json', 10)],
+      logs: [file('latest.log', 30)],
+      log: log(
+        '[12:00:00 INFO]: [bootstrap] Loading Folia 1.21.4-6-main@abc (2025-01-01T00:00:00Z) for Minecraft 1.21.4\n',
+      ),
+    };
+    const same = detect(inputs({ ...base, versionHistory: history('1.21.4-5-main@def (MC: 1.21.4)') }));
+    assert.deepEqual(same.conflicts, []);
+    assert.equal(same.evidence.find((entry) => entry.source === 'version_history')?.value, '1.21.4 · 5');
+
+    const older = detect(inputs({ ...base, versionHistory: history('1.21.3-2-main@def (MC: 1.21.3)') }));
+    assert.deepEqual(older.conflicts, [
+      { source: 'version_history', detail: 'version_history.json', value: '1.21.3 · 2', stale: true },
+    ]);
+  });
+
+  test('a fresh log and fresh history: nothing is stale', () => {
+    const result = detect(
+      inputs({
+        root: [file('server.jar', 0), file('version_history.json', 10)],
+        logs: [file('latest.log', 10)],
+        versionHistory: history('git-Paper-196 (MC: 1.20.1)'),
+      }),
+    );
+    assert.deepEqual(result.staleSources, []);
+    assert.equal(result.logStale, false);
   });
 
   test('downgrade: the newest versions/ folder wins over the highest name', () => {
@@ -600,6 +666,7 @@ describe('Override', () => {
       source: 'override',
       detail: '.mc-plugins-installer.json',
       value: 'invalid',
+      stale: false,
     });
   });
 });

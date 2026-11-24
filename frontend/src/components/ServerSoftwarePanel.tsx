@@ -62,6 +62,11 @@ export function EvidenceList({ evidence, detection }: { evidence: Evidence[]; de
               ? tExt(`pages.server.plugins.software.overrideProblem.${detection.overrideProblem}`, {})
               : entry.value}
           </Text>
+          {entry.stale && (
+            <Badge color='yellow' variant='outline' size='sm'>
+              {tExt('pages.server.plugins.software.staleBadge', {})}
+            </Badge>
+          )}
         </Group>
       ))}
     </Stack>
@@ -102,6 +107,8 @@ function PanelContent({ detection }: { detection: ServerDetection }) {
 
   const software = detection.software;
   const notDetected = tExt('pages.server.plugins.software.notDetected', {});
+  // Name only what is older than the install: the log, version_history.json, or both.
+  const staleNote = detection.staleSources.length > 1 ? 'both' : (detection.staleSources[0] ?? null);
 
   const clearOverride = async () => {
     setClearing(true);
@@ -165,9 +172,22 @@ function PanelContent({ detection }: { detection: ServerDetection }) {
         </Alert>
       )}
 
-      {detection.logStale && (
-        <Alert color='blue' title={tExt('pages.server.plugins.software.logStale.title', {})}>
-          <Text size='sm'>{tExt('pages.server.plugins.software.logStale.content', {})}</Text>
+      {detection.conflicts.length > 0 && (
+        <Alert
+          color='yellow'
+          icon={faTriangleExclamation}
+          title={tExt('pages.server.plugins.software.conflicts.title', {})}
+        >
+          <Stack gap='xs'>
+            <Text size='sm'>{tExt('pages.server.plugins.software.conflicts.description', {})}</Text>
+            <EvidenceList evidence={detection.conflicts} detection={detection} />
+          </Stack>
+        </Alert>
+      )}
+
+      {staleNote && (
+        <Alert color='blue' title={tExt(`pages.server.plugins.software.stale.${staleNote}.title`, {})}>
+          <Text size='sm'>{tExt(`pages.server.plugins.software.stale.${staleNote}.content`, {})}</Text>
         </Alert>
       )}
 
@@ -187,16 +207,6 @@ function PanelContent({ detection }: { detection: ServerDetection }) {
           </Text>
         )}
       </Stack>
-
-      {detection.conflicts.length > 0 && (
-        <Stack gap='xs'>
-          <Text fw={600}>{tExt('pages.server.plugins.software.conflicts.title', {})}</Text>
-          <Text size='sm' c='dimmed'>
-            {tExt('pages.server.plugins.software.conflicts.description', {})}
-          </Text>
-          <EvidenceList evidence={detection.conflicts} detection={detection} />
-        </Stack>
-      )}
 
       {(!canSet || (detection.override && !canClear)) && (
         <Text size='xs' c='dimmed'>

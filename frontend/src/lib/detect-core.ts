@@ -26,6 +26,8 @@ export interface Evidence {
   /** A path, or a log line of at most 200 characters. */
   detail: string;
   value: string;
+  /** A log or version_history.json older than the newest install artifact (it counts less). */
+  stale: boolean;
 }
 
 export interface ServerDetection {
@@ -37,7 +39,10 @@ export interface ServerDetection {
   loaderVersion: DetectedValue<string> | null;
   evidence: Evidence[];
   conflicts: Evidence[];
+  /** Whether the log or version_history.json is older than the newest install artifact (`staleSources` not empty). */
   logStale: boolean;
+  /** Which of the log and version_history.json are older than the newest install artifact. */
+  staleSources: ('log' | 'version_history')[];
   override: SoftwareOverride | null;
   overrideSetAt: string | null;
   overrideProblem: StateFileProblem | null;
@@ -574,9 +579,15 @@ function newest<T>(list: FileEntry[] | null | undefined, parse: (entry: FileEntr
 const toEvidence = (found: Claim): Evidence => ({
   source: found.source,
   detail: found.detail,
-  value: [found.software ? softwareLabel(found.software) : null, found.minecraftVersion, found.loaderVersion]
+  value: [
+    // An unbranded version_history.json only says "a Paper fork"; don't present it as Paper.
+    found.software && (found.exact || found.source !== 'version_history') ? softwareLabel(found.software) : null,
+    found.minecraftVersion,
+    found.loaderVersion,
+  ]
     .filter((part) => part)
     .join(' · '),
+  stale: found.rank === 6,
 });
 
 /** Newest first; claims without a time keep their order behind those with one. */
@@ -682,8 +693,9 @@ export function detect(inputs: DetectionInputs): ServerDetection {
     inputs.logs?.find((entry) => entry.name === 'latest.log' && !entry.directory) ??
     inRoot('proxy.log.0', false);
   const historyEntry = inRoot('version_history.json', false);
-  const logStale =
-    (presentLog !== null && !fresh(presentLog.modified)) || (historyEntry !== null && !fresh(historyEntry.modified));
+  const staleSources: ServerDetection['staleSources'] = [];
+  if (presentLog !== null && !fresh(presentLog.modified)) staleSources.push('log');
+  if (historyEntry !== null && !fresh(historyEntry.modified)) staleSources.push('version_history');
 
   if (readable && inputs.log) {
     const logFresh = fresh(logEntry?.modified);
@@ -939,21 +951,34 @@ export function detect(inputs: DetectionInputs): ServerDetection {
     : null;
 
   const minecraftVersion = minecraftClaim?.minecraftVersion ?? null;
+  // A finding that names its software disagrees unless it names the chosen one; a generic artifact (Paper configs,
+  // loader libraries) only when the chosen software doesn't leave it.
   const disagrees = (entry: Claim, running: Software | null, version: string | null) =>
-    (running !== null && entry.software !== null && !covers(running, entry.software)) ||
+    (running !== null &&
+      entry.software !== null &&
+      (entry.exact ? entry.software !== running : !covers(running, entry.software))) ||
     (versionApplicable &&
       version !== null &&
       entry.minecraftVersion !== null &&
       entry.minecraftVersion !== version &&
       (running === null || entry.software === null || covers(running, entry.software)));
 
-  const contested = claims.filter((entry) => entry.rank >= 2 && entry.rank <= 5);
-  const conflicts = contested.filter((entry) => disagrees(entry, software, minecraftVersion)).map(toEvidence);
+  // Ranks 2-5 and the stale log/version_history (6), which the UI marks as stale.
+  const conflicts = claims
+    .filter(
+      (entry) => entry.rank >= 2 && entry.rank <= 6 && entry !== chosen && disagrees(entry, software, minecraftVersion),
+    )
+    .map(toEvidence);
   const overrideDisagrees =
-    override !== null && contested.some((entry) => disagrees(entry, override.software, override.minecraftVersion));
+    override !== null &&
+    claims.some(
+      (entry) => entry.rank >= 2 && entry.rank <= 5 && disagrees(entry, override.software, override.minecraftVersion),
+    );
 
   const evidence = claims.map(toEvidence);
-  if (overrideProblem) evidence.unshift({ source: 'override', detail: STATE_FILE_NAME, value: overrideProblem });
+  if (overrideProblem) {
+    evidence.unshift({ source: 'override', detail: STATE_FILE_NAME, value: overrideProblem, stale: false });
+  }
 
   const minecraftSignal =
     inRoot('server.properties', false) !== null ||
@@ -973,7 +998,8 @@ export function detect(inputs: DetectionInputs): ServerDetection {
       : null,
     evidence,
     conflicts,
-    logStale,
+    logStale: staleSources.length > 0,
+    staleSources,
     override,
     overrideSetAt: override ? (inputs.state?.setAt ?? null) : null,
     overrideProblem,
