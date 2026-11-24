@@ -12,7 +12,8 @@ extension works on its own: it needs no other extension.
   detected platform and Minecraft version. Filters live in the URL, so a filtered view can be bookmarked or shared.
 - **Installed**: every jar in the server's `plugins/` folder (`.jar` in any case, and disabled `.jar.disabled`) in a
   searchable table, identified by file hash. Enable or disable plugins, switch their version, update them, or delete
-  them. Jars built for another platform are flagged **Wrong platform**.
+  them. Jars built for another platform are flagged **Wrong platform**, and a plugin with two enabled jars is flagged
+  **Installed twice** (the server refuses to load both).
 - **Updates**: identified plugins show **Update to x.y** when a newer release runs on the server (beta updates behind
   the **Include beta updates** switch). The **Updates** filter lists them, and **Update all** shows a review list
   first and then updates one plugin at a time.

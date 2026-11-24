@@ -22,7 +22,7 @@
   Purpur), the newest `versions/` folder, and launch arguments. Mod-loader and vanilla servers get a short explanation
   instead of the plugin pages.
 - Installing a build for another platform is blocked (with the reason), and the Installed list flags jars built for a
-  different platform.
+  different platform and plugins installed twice.
 - The plugin pages now need only `files.read`; identification, update checks and log reading use `files.read-content`
   when the user has it.
 - Installed jars are hashed by the extension's backend in batches and cached; `.JAR` files in any case are listed.
