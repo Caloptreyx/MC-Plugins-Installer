@@ -74,6 +74,9 @@ function toVersion(version: z.infer<typeof versionSchema>): PluginVersion {
   const { file, ...rest } = version;
   return {
     ...rest,
+    // CurseForge file names are often just the plugin name ("DisguiseCraft.jar"); the display name ("v5.1") is the
+    // version label its site shows.
+    versionNumber: rest.name,
     source: 'curseforge',
     loaders: ['bukkit'],
     file: file && {
