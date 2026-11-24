@@ -192,6 +192,10 @@ const translations = defineTranslations({
               notDetected:
                 "The server software couldn't be detected. Make sure the loader you pick matches your server.",
             },
+            failure: {
+              title: 'The install failed',
+              partialTitle: 'Installed, but a file is left over',
+            },
             dependencies: {
               title: 'Required plugins',
               alsoInstall: 'Also install {plugin}',
@@ -249,6 +253,9 @@ const translations = defineTranslations({
               'This jar was not found on Modrinth, CurseForge or Hangar, so it cannot switch versions.',
             wrongPlatform: 'Wrong platform',
             wrongPlatformHint: 'This jar is built for {platforms}, but this server runs {server}. It may not load.',
+            duplicate: 'Installed twice',
+            duplicateHint:
+              'This plugin is installed twice: Bukkit refuses to load both. Disable or delete one of the copies.',
             empty: {
               title: 'No plugins installed',
               description: 'The plugins folder of this server has no plugin jars yet.',
@@ -349,12 +356,26 @@ const translations = defineTranslations({
             },
             conflicts: {
               title: 'Disagreeing findings',
-              description: 'These point to something else. The detection above follows the stronger source.',
+              description:
+                'These point to something else. The detection follows the stronger source; findings marked as older than the install count least.',
             },
-            logStale: {
-              title: 'The log is older than the install',
-              content:
-                'The server software changed after the last start, so the log and version_history.json count less. Start the server once to refresh them.',
+            staleBadge: 'Older than the install',
+            stale: {
+              log: {
+                title: 'The log is older than the install',
+                content:
+                  'The server software changed after the last start, so the log counts less. Start the server once to refresh it.',
+              },
+              version_history: {
+                title: 'version_history.json is older than the install',
+                content:
+                  'The server software changed after version_history.json was last written, so it counts less. Start the server once to refresh it.',
+              },
+              both: {
+                title: 'The log and version_history.json are older than the install',
+                content:
+                  'The server software changed after the last start, so the log and version_history.json count less. Start the server once to refresh them.',
+              },
             },
             noContent:
               "You can't read file contents on this server, so the log, launch arguments, install markers and the override file were not checked.",

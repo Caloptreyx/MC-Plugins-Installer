@@ -17,6 +17,7 @@ import type { InstallTarget } from './InstallPluginModal.tsx';
 import { curseforgeFileUrl } from '../lib/curseforge.ts';
 import { installPluginVersion, installUploadedJar } from '../lib/install.ts';
 import { versionWithFile } from '../lib/modrinth.ts';
+import { useRefreshInstalledPlugins } from '../lib/queries.ts';
 import { useExtTranslations } from '../translations.ts';
 import { useErrorMessage } from './useErrorMessage.ts';
 
@@ -41,6 +42,8 @@ export default function ManualDownloadPanel({ project, version, loader, installe
   const errorMessage = useErrorMessage();
   const [upload, setUpload] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const refreshInstalled = useRefreshInstalledPlugins();
 
   const sha1 = version.file?.hashes.sha1 ?? null;
   const onModrinth = useQuery({
@@ -52,16 +55,26 @@ export default function ManualDownloadPanel({ project, version, loader, installe
 
   const run = async (action: () => Promise<unknown>, done: string) => {
     setBusy(true);
+    setFailure(null);
     try {
       await action();
       addToast(done, 'success');
       onInstalled();
     } catch (error) {
-      addToast(errorMessage(error), 'error');
+      const message = errorMessage(error);
+      setFailure(message);
+      addToast(message, 'error');
+      refreshInstalled();
     } finally {
       setBusy(false);
     }
   };
+
+  const failureText = failure && (
+    <Text size='sm' c='red'>
+      {failure}
+    </Text>
+  );
 
   const values = { plugin: project.title, version: version.versionNumber };
 
@@ -85,6 +98,7 @@ export default function ManualDownloadPanel({ project, version, loader, installe
               {tExt('pages.server.plugins.manual.installFromModrinth', {})}
             </Button>
           </Group>
+          {failureText}
         </Stack>
       </Alert>
     );
@@ -122,6 +136,7 @@ export default function ManualDownloadPanel({ project, version, loader, installe
             {tExt('pages.server.plugins.manual.upload', {})}
           </Button>
         </Group>
+        {failureText}
       </Stack>
     </Alert>
   );

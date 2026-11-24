@@ -88,6 +88,8 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
   const [preReleasesChoice, setPreReleasesChoice] = useState<boolean>();
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [installing, setInstalling] = useState(false);
+  // The last install's failure, shown in the modal until the next attempt.
+  const [failure, setFailure] = useState<{ message: string; installedAnyway: boolean } | null>(null);
 
   const supportedLoaders = useMemo(
     () => PLUGIN_LOADER_IDS.filter((loader) => versions.some((version) => runsOn(version.loaders, loader))),
@@ -163,8 +165,16 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
     return failed;
   };
 
+  const finishDependencies = async () => {
+    const failed = await installDependencies();
+    if (failed.length > 0) {
+      addToast(tExt('pages.server.plugins.install.toast.dependenciesFailed', { list: failed.join('; ') }), 'error');
+    }
+  };
+
   const install = async (version: PluginVersion) => {
     setInstalling(true);
+    setFailure(null);
     try {
       await installPluginVersion(uuid, version, loader, installed);
       addToast(
@@ -179,13 +189,17 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
             }),
         'success',
       );
-      const failed = await installDependencies();
-      if (failed.length > 0) {
-        addToast(tExt('pages.server.plugins.install.toast.dependenciesFailed', { list: failed.join('; ') }), 'error');
-      }
+      await finishDependencies();
       onClose();
     } catch (error) {
-      addToast(errorMessage(error), 'error');
+      const message = errorMessage(error);
+      // The new jar is in place but the old one (or its backup) is left over: dependencies still go in, and the modal
+      // stays open naming the file, since two copies of a plugin stop it from loading.
+      const installedAnyway =
+        error instanceof InstallError && (error.kind === 'oldNotRemoved' || error.kind === 'backupLeft');
+      if (installedAnyway) await finishDependencies();
+      setFailure({ message, installedAnyway });
+      addToast(message, 'error');
     } finally {
       setInstalling(false);
       refreshInstalled();
@@ -360,14 +374,28 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
         </Text>
       )}
 
-      {blockedReason && (
+      {blockedReason && !failure?.installedAnyway && (
         <Text size='sm' c='red'>
           {blockedReason}
         </Text>
       )}
 
+      {failure && (
+        <Alert
+          color={failure.installedAnyway ? 'yellow' : 'red'}
+          icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
+          title={
+            failure.installedAnyway
+              ? tExt('pages.server.plugins.install.failure.partialTitle', {})
+              : tExt('pages.server.plugins.install.failure.title', {})
+          }
+        >
+          <Text size='sm'>{failure.message}</Text>
+        </Alert>
+      )}
+
       <ModalFooter>
-        {availability !== 'manual' && (
+        {availability !== 'manual' && !failure?.installedAnyway && (
           <ConditionalTooltip enabled={!!blockedReason} label={blockedReason ?? ''}>
             <Button
               color='blue'
@@ -383,7 +411,9 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
           </ConditionalTooltip>
         )}
         <Button variant='default' onClick={onClose}>
-          {tExt('pages.server.plugins.actions.cancel', {})}
+          {failure?.installedAnyway
+            ? tExt('pages.server.plugins.actions.close', {})
+            : tExt('pages.server.plugins.actions.cancel', {})}
         </Button>
       </ModalFooter>
     </Stack>
