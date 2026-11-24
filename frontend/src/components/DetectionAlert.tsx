@@ -1,34 +1,54 @@
-import { faTriangleExclamation } from '@fortawesome/free-solid-svg-icons';
+import { faPen, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { Stack } from '@mantine/core';
+import { useState } from 'react';
+import Button from '@/elements/buttons/Button.tsx';
 import Alert from '@/elements/feedback/Alert.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import { useDetection } from '../lib/queries.ts';
+import { useExtTranslations } from '../translations.ts';
+import OverrideModal from './OverrideModal.tsx';
+import { useOverrideAccess } from './ServerSoftwarePanel.tsx';
 
-/** Warns when the plugin loader or Minecraft version could not be detected. */
+/** Short warning when the server software or Minecraft version could not be detected, with the manual override. */
 export default function DetectionAlert() {
+  const { t: tExt } = useExtTranslations();
   const { data } = useDetection();
+  const { canSet } = useOverrideAccess();
+  const [opened, setOpened] = useState(false);
+
   if (!data) return null;
-
-  const missing = [
-    data.loader ? null : 'Plugin Loader',
-    data.versionApplicable && !data.minecraftVersion ? 'Minecraft version' : null,
-  ].filter((item) => item !== null);
-
-  if (missing.length === 0) return null;
+  const missingSoftware = !data.software;
+  const missingVersion = data.versionApplicable && !data.minecraftVersion;
+  if (!missingSoftware && !missingVersion) return null;
 
   return (
     <Alert
       color='yellow'
       variant='light'
       mb='md'
-      icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
-      title={`Couldn't detect the ${missing.join(' or ')}`}
+      icon={faTriangleExclamation}
+      title={
+        missingSoftware
+          ? tExt('pages.server.plugins.software.alert.softwareTitle', {})
+          : tExt('pages.server.plugins.software.alert.versionTitle', {})
+      }
     >
-      <Text size='sm'>
-        Start the server at least once so it generates its files, then use the refresh button to detect again. Until
-        then, results are not narrowed to your server: pick the loader and Minecraft version yourself in the filters and
-        when installing a plugin.
-      </Text>
+      <Stack gap='xs' align='flex-start'>
+        <Text size='sm'>{tExt('pages.server.plugins.software.alert.content', {})}</Text>
+        {canSet && (
+          <Button
+            size='xs'
+            variant='light'
+            color='yellow'
+            leftSection={<FontAwesomeIcon icon={faPen} />}
+            onClick={() => setOpened(true)}
+          >
+            {tExt('pages.server.plugins.software.setManually', {})}
+          </Button>
+        )}
+      </Stack>
+      <OverrideModal opened={opened} onClose={() => setOpened(false)} />
     </Alert>
   );
 }

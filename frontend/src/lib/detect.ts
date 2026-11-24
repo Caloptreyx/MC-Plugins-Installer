@@ -1,19 +1,21 @@
 import getFileContent from '@/api/server/files/getFileContent.ts';
 import getFileLines from '@/api/server/files/getFileLines.ts';
 import getVariables from '@/api/server/startup/getVariables.ts';
-import { compareGameVersions, RELEASE_VERSION } from './format.ts';
-import { compatibleLoaders, isProxyLoader, type PluginLoader } from './loaders.ts';
-import { listDirectory } from './serverFiles.ts';
-
-export interface ServerDetection {
-  loader: PluginLoader | null;
-  /** Where the loader was read from, shown to the user as the badge tooltip. */
-  loaderSource: string | null;
-  minecraftVersion: string | null;
-  versionSource: string | null;
-  /** False on proxies, which serve every Minecraft version and never need one detected. */
-  versionApplicable: boolean;
-}
+import {
+  type DetectionInputs,
+  detect,
+  type FileEntry,
+  LIBRARY_DIRS,
+  type LibraryDir,
+  LOG_HEAD_LINES,
+  MODPACK_MARKER,
+  referencedArgsFile,
+  type ServerDetection,
+  VERSION_CHANGER_MARKER,
+} from './detect-core.ts';
+import { type DirectoryEntry, listDirectory } from './serverFiles.ts';
+import { readStateFile } from './stateFile.ts';
+import { STATE_FILE_NAME } from './stateFormat.ts';
 
 interface DetectableServer {
   uuid: string;
@@ -22,139 +24,114 @@ interface DetectableServer {
   image: string;
 }
 
-type Detected<T> = [value: T, source: string] | null;
+const KIB = 1024;
+/** Largest files read whole; bigger ones are skipped rather than downloaded. */
+const MAX_SMALL_FILE = 64 * KIB;
+const MAX_SCRIPT = 256 * KIB;
+const MAX_MODPACK_MARKER = 2 * KIB * KIB;
 
-/** Config files a platform writes on first start, most specific platform first. */
-const FILE_MARKERS: [path: string, loader: PluginLoader][] = [
-  ['purpur.yml', 'purpur'],
-  ['velocity.toml', 'velocity'],
-  ['waterfall.yml', 'waterfall'],
-  ['modules.yml', 'bungeecord'],
-  ['config/paper-global.yml', 'paper'],
-  ['paper.yml', 'paper'],
-  ['spigot.yml', 'spigot'],
-  ['bukkit.yml', 'bukkit'],
-  ['config/sponge', 'sponge'],
-];
+const toEntries = (entries: DirectoryEntry[] | null): FileEntry[] | null =>
+  entries?.map((entry) => ({ name: entry.name, directory: entry.directory, modified: entry.modified.getTime() })) ??
+  null;
 
-/** Platform names as they appear in egg names, jar names, startup commands and images. */
-const KEYWORDS: [pattern: RegExp, loader: PluginLoader][] = [
-  [/folia/, 'folia'],
-  [/purpur/, 'purpur'],
-  [/paper|pufferfish|leaves/, 'paper'],
-  [/velocity/, 'velocity'],
-  [/waterfall/, 'waterfall'],
-  [/bungee/, 'bungeecord'],
-  [/spigot/, 'spigot'],
-  [/bukkit/, 'bukkit'],
-  [/sponge/, 'sponge'],
-];
+/** A directory listing, `null` when it is missing or can't be listed. */
+const list = (uuid: string, path: string) => listDirectory(uuid, path).catch(() => null);
 
-const VERSION_VARIABLES = ['MINECRAFT_VERSION', 'MC_VERSION', 'VERSION', 'MINECRAFT_VER'];
-
-const keywordLoader = (text: string) => KEYWORDS.find(([pattern]) => pattern.test(text.toLowerCase()))?.[1] ?? null;
-
-/** `currentVersion` from `version_history.json`, which Paper and its forks rewrite on every boot. */
-async function readVersionHistory(uuid: string): Promise<string | null> {
+/** The text of a small file, `null` when it is missing, unreadable or larger than `maxBytes`. */
+async function readText(uuid: string, path: string, maxBytes: number) {
   try {
-    const blob = await getFileContent(uuid, '/version_history.json');
-    return (JSON.parse(await blob.text()) as { currentVersion?: string }).currentVersion ?? null;
+    const blob = await getFileContent(uuid, path);
+    return blob.size > maxBytes ? null : await blob.text();
   } catch {
     return null;
   }
 }
 
-function detectLoader(
-  versionHistory: string | null,
-  paths: Set<string>,
-  configuration: string,
-): Detected<PluginLoader> {
-  // Older builds brand the history entry (`git-Purpur-2062 (MC: 1.20.1)`), which is authoritative.
-  const brand = versionHistory ? keywordLoader(versionHistory.replace(/\(MC:.*\)/, '')) : null;
-  if (brand) return [brand, 'version_history.json'];
-
-  const marker = FILE_MARKERS.find(([path]) => paths.has(path)) ?? null;
-  const named = keywordLoader(configuration);
-
-  // Forks also write their parent's configs (Folia and Purpur both write Paper's), so a name
-  // that is a fork of the file match is the more precise answer.
-  if (marker && named && compatibleLoaders(named).includes(marker[1])) {
-    return [named, `${marker[0]} and server configuration`];
-  }
-  if (marker) return [marker[1], marker[0]];
-  if (named) return [named, 'server egg and startup configuration'];
-  return null;
-}
-
-async function detectMinecraftVersion(
-  uuid: string,
-  versionHistory: string | null,
-  paths: Set<string>,
-  variableValue: (name: string) => string,
-): Promise<Detected<string>> {
-  const history = versionHistory?.match(/\(MC: ([^)]+)\)/)?.[1];
-  if (history && RELEASE_VERSION.test(history)) return [history, 'version_history.json'];
-
-  const log = await getFileLines(uuid, '/logs/latest.log', 1, 400).catch(() => null);
-  const logged = log?.content.match(/Starting minecraft server version (\S+)/)?.[1];
-  if (logged && RELEASE_VERSION.test(logged)) return [logged, 'logs/latest.log'];
-
-  // Paperclip extracts the vanilla server into versions/<minecraft version>/.
-  if (paths.has('versions')) {
-    const extracted = ((await listDirectory(uuid, '/versions').catch(() => null)) ?? [])
-      .filter((entry) => entry.directory && RELEASE_VERSION.test(entry.name))
-      .map((entry) => entry.name)
-      .sort(compareGameVersions);
-    if (extracted.length > 0) return [extracted[extracted.length - 1], 'versions/ directory'];
-  }
-
-  const configured = VERSION_VARIABLES.map(variableValue).find((value) => RELEASE_VERSION.test(value));
-  return configured ? [configured, 'startup variables'] : null;
-}
-
 /**
- * Works out which plugin platform and Minecraft version a server runs, from the files it wrote
- * on its last start, its logs, and its egg/startup configuration. Every probe is best effort:
- * missing files or permissions simply leave that value undetected.
+ * Collects what the detector ranks (listings, the log head, `version_history.json`, launch arguments, install markers,
+ * the override file, startup variables and the egg) and runs `detect` on it. File contents are only read with
+ * `files.read-content` and variables only with `startup.read`; every probe is best effort, so a missing file or a
+ * failed request only leaves that source out.
  */
-export async function detectServer(server: DetectableServer, canReadStartup: boolean): Promise<ServerDetection> {
-  const [root, variables, versionHistory] = await Promise.all([
-    listDirectory(server.uuid, '/').catch(() => null),
-    canReadStartup ? getVariables(server.uuid).catch(() => []) : Promise.resolve([]),
-    readVersionHistory(server.uuid),
+export async function detectServer(
+  server: DetectableServer,
+  { canReadStartup, canReadContent }: { canReadStartup: boolean; canReadContent: boolean },
+): Promise<ServerDetection> {
+  const { uuid } = server;
+  const [rootListing, variables] = await Promise.all([
+    list(uuid, '/'),
+    canReadStartup ? getVariables(uuid).catch(() => null) : Promise.resolve(null),
+  ]);
+  const root = rootListing ?? [];
+  const rootEntry = (name: string, directory: boolean) =>
+    root.find((entry) => entry.name === name && entry.directory === directory) ?? null;
+  const hasDir = (name: string) => rootEntry(name, true) !== null;
+  const smallFile = (name: string, maxBytes: number) => {
+    const entry = rootEntry(name, false);
+    return canReadContent && entry && entry.size <= maxBytes ? readText(uuid, `/${name}`, maxBytes) : null;
+  };
+
+  const libraryDirs = Object.keys(LIBRARY_DIRS) as LibraryDir[];
+  const [config, logs, versions, cache, libraryListings] = await Promise.all([
+    hasDir('config') ? list(uuid, '/config') : null,
+    hasDir('logs') ? list(uuid, '/logs') : null,
+    hasDir('versions') ? list(uuid, '/versions') : null,
+    hasDir('cache') ? list(uuid, '/cache') : null,
+    Promise.all(libraryDirs.map((dir) => (hasDir('libraries') ? list(uuid, `/${LIBRARY_DIRS[dir]}`) : null))),
   ]);
 
-  const paths = new Set((root ?? []).map((entry) => entry.name));
-  if (paths.has('config')) {
-    const config = await listDirectory(server.uuid, '/config').catch(() => null);
-    for (const entry of config ?? []) paths.add(`config/${entry.name}`);
-  }
+  // Paper, Fabric, Forge and Velocity log to logs/latest.log; BungeeCord to proxy.log.0.
+  const logPath = logs?.some((entry) => entry.name === 'latest.log' && !entry.directory)
+    ? 'logs/latest.log'
+    : rootEntry('proxy.log.0', false)
+      ? 'proxy.log.0'
+      : null;
 
-  const variableValue = (name: string) => variables.find((v) => v.envVariable === name)?.value ?? '';
+  const [log, versionHistory, unixArgs, runScript, versionChangerMarker, modpackMarker, state] = await Promise.all([
+    canReadContent && logPath
+      ? getFileLines(uuid, `/${logPath}`, 1, LOG_HEAD_LINES)
+          .then((lines) => ({ path: logPath, content: lines.content }))
+          .catch(() => null)
+      : null,
+    smallFile('version_history.json', MAX_SMALL_FILE),
+    smallFile('unix_args.txt', MAX_SCRIPT),
+    smallFile('run.sh', MAX_SCRIPT),
+    smallFile(VERSION_CHANGER_MARKER, MAX_SMALL_FILE),
+    smallFile(MODPACK_MARKER, MAX_MODPACK_MARKER),
+    canReadContent && rootEntry(STATE_FILE_NAME, false) ? readStateFile(uuid).catch(() => null) : null,
+  ]);
 
-  const loader = detectLoader(
+  const argsPath = runScript ? referencedArgsFile(runScript) : null;
+  const argsContent = argsPath ? await readText(uuid, `/${argsPath}`, MAX_SCRIPT) : null;
+
+  const inputs: DetectionInputs = {
+    contentReadable: canReadContent,
+    root: toEntries(rootListing),
+    config: toEntries(config),
+    logs: toEntries(logs),
+    versions: toEntries(versions),
+    cache: toEntries(cache),
+    libraries: Object.fromEntries(libraryDirs.map((dir, index) => [dir, toEntries(libraryListings[index])])),
+    log,
     versionHistory,
-    paths,
-    [server.egg.name, server.startup, variableValue('SERVER_JARFILE'), server.image].join(' '),
-  );
-
-  if (loader && isProxyLoader(loader[0])) {
-    return {
-      loader: loader[0],
-      loaderSource: loader[1],
-      minecraftVersion: null,
-      versionSource: null,
-      versionApplicable: false,
-    };
-  }
-
-  const version = await detectMinecraftVersion(server.uuid, versionHistory, paths, variableValue);
-
-  return {
-    loader: loader?.[0] ?? null,
-    loaderSource: loader?.[1] ?? null,
-    minecraftVersion: version?.[0] ?? null,
-    versionSource: version?.[1] ?? null,
-    versionApplicable: true,
+    unixArgs,
+    runScript,
+    argsFile: argsPath && argsContent !== null ? { path: argsPath, content: argsContent } : null,
+    versionChangerMarker,
+    modpackMarker,
+    state: state ? { override: state.state.override, setAt: state.state.setAt, problem: state.problem } : null,
+    variables:
+      variables?.map((variable) => ({
+        envVariable: variable.envVariable,
+        value: variable.value,
+        isSecret: variable.isSecret,
+      })) ?? null,
+    eggName: server.egg.name,
+    // The client server API carries no nest, so the egg name, startup command and image are all there is.
+    nestName: null,
+    startup: server.startup,
+    image: server.image,
   };
+
+  return detect(inputs);
 }
