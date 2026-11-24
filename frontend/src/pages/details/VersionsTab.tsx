@@ -191,9 +191,10 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
 
           return (
             <TableRow key={version.id}>
-              <TableData>
-                <Stack gap={2}>
-                  <Group gap={6} wrap='nowrap'>
+              {/* Long version names wrap so the badge columns keep their width. */}
+              <TableData style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
+                <Stack gap={2} miw={180}>
+                  <Group gap={6} wrap='wrap'>
                     <Text fw={500} size='sm'>
                       {version.name}
                     </Text>
@@ -216,10 +217,12 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
                 </Stack>
               </TableData>
               <TableData>
-                <ChannelBadge channel={version.channel} />
+                <Group miw={70} wrap='nowrap'>
+                  <ChannelBadge channel={version.channel} />
+                </Group>
               </TableData>
               <TableData>
-                <Group gap={4} wrap='nowrap'>
+                <Group gap={4} wrap='nowrap' miw={220}>
                   {version.gameVersions.slice(0, SHOWN_GAME_VERSIONS).map((value) => (
                     <Badge key={value} color='gray' variant='light' size='sm'>
                       {value}
@@ -235,7 +238,7 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
                 </Group>
               </TableData>
               <TableData>
-                <Group gap={4} wrap='nowrap'>
+                <Group gap={4} wrap='nowrap' miw={120}>
                   {version.loaders.map((value) => (
                     <LoaderBadge key={value} loader={value} />
                   ))}
