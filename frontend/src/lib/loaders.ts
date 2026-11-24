@@ -62,11 +62,3 @@ export function runsOn(buildLoaders: readonly string[], server: PluginLoader): b
   const accepted = compatibleLoaders(server);
   return buildLoaders.some((loader) => accepted.includes(loader as PluginLoader));
 }
-
-/** Select options for picking a server platform, marking the detected one. */
-export function loaderSelectData(detected: PluginLoader | null) {
-  return PLUGIN_LOADER_IDS.map((value) => ({
-    value,
-    label: value === detected ? `${LOADERS[value].label} (detected)` : LOADERS[value].label,
-  }));
-}

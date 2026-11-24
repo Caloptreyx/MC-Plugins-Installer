@@ -1,13 +1,15 @@
 import type {
   CategoryOption,
+  DependencyKind,
   PluginProject,
   PluginSummary,
   PluginVersion,
   SearchParams,
   VersionChannel,
 } from './catalog.ts';
+import { isAllowedDownload, isValidJarName } from './fileRules.ts';
 import { newestFirst } from './format.ts';
-import { isPluginLoader } from './loaders.ts';
+import { compatibleLoaders, isPluginLoader } from './loaders.ts';
 
 const API_URL = 'https://api.modrinth.com/v2';
 
@@ -50,6 +52,14 @@ interface Project {
   discord_url: string | null;
 }
 
+interface VersionFileData {
+  url: string;
+  filename: string;
+  primary: boolean;
+  size: number;
+  hashes: { sha1?: string; sha512?: string };
+}
+
 interface Version {
   id: string;
   project_id: string;
@@ -60,7 +70,12 @@ interface Version {
   game_versions: string[];
   downloads: number;
   date_published: string;
-  files: { url: string; filename: string; primary: boolean; size: number }[];
+  files: VersionFileData[];
+  dependencies?: {
+    project_id: string | null;
+    version_id: string | null;
+    dependency_type: 'required' | 'optional' | 'incompatible' | 'embedded';
+  }[];
 }
 
 interface TeamMember {
@@ -75,15 +90,23 @@ interface CategoryTag {
   header: string;
 }
 
+export class ModrinthError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`Modrinth HTTP ${status}`);
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
-  if (!response.ok) {
-    throw new Error(
-      response.status === 404 ? 'Not found on Modrinth.' : `Modrinth request failed (HTTP ${response.status}).`,
-    );
-  }
+  if (!response.ok) throw new ModrinthError(response.status);
   return response.json() as Promise<T>;
 }
+
+const postJson = <T>(path: string, body: unknown) =>
+  request<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
 const categoryLabel = (name: string) => name.replace(/-/g, ' ');
 
@@ -115,7 +138,7 @@ const projectUrl = (slug: string) => `https://modrinth.com/plugin/${slug}`;
 export async function searchPlugins(params: SearchParams): Promise<Pagination<PluginSummary>> {
   // Facet groups are AND-ed together, entries inside one group are OR-ed.
   const facets: string[][] = [['project_type:plugin']];
-  if (params.loaders.length > 0) facets.push(params.loaders.map((loader) => `categories:${loader}`));
+  if (params.loader) facets.push(compatibleLoaders(params.loader).map((loader) => `categories:${loader}`));
   if (params.gameVersion) facets.push([`versions:${params.gameVersion}`]);
   if (params.category) facets.push([`categories:${params.category}`]);
 
@@ -193,19 +216,30 @@ export async function getProject(idOrSlug: string): Promise<PluginProject> {
     bodyFormat: 'markdown',
     license: project.license ? project.license.name || project.license.id : null,
     links: [
-      { label: 'Source', url: project.source_url },
-      { label: 'Issues', url: project.issues_url },
-      { label: 'Wiki', url: project.wiki_url },
-      { label: 'Discord', url: project.discord_url },
+      { label: 'source', url: project.source_url },
+      { label: 'issues', url: project.issues_url },
+      { label: 'wiki', url: project.wiki_url },
+      { label: 'discord', url: project.discord_url },
     ].filter((link): link is { label: string; url: string } => !!link.url),
   };
 }
 
-function mapVersion(version: Version): PluginVersion {
-  // A version installs its primary file, falling back to its first jar.
+const DEPENDENCY_KINDS: Record<string, DependencyKind | undefined> = {
+  required: 'required',
+  optional: 'optional',
+  incompatible: 'incompatible',
+};
+
+/**
+ * `preferredSha1` picks that file (identification by hash); otherwise the primary jar, else the first jar. Files with
+ * an unsafe name or a download outside Modrinth's CDN are never offered.
+ */
+function mapVersion(version: Version, preferredSha1?: string): PluginVersion {
+  const jars = version.files.filter((candidate) => isValidJarName(candidate.filename));
   const file =
-    version.files.find((candidate) => candidate.primary) ??
-    version.files.find((candidate) => candidate.filename.endsWith('.jar'));
+    (preferredSha1 && version.files.find((candidate) => candidate.hashes.sha1 === preferredSha1)) ||
+    jars.find((candidate) => candidate.primary) ||
+    jars[0];
 
   return {
     source: 'modrinth',
@@ -218,30 +252,45 @@ function mapVersion(version: Version): PluginVersion {
     gameVersions: newestFirst(version.game_versions),
     downloads: version.downloads,
     published: version.date_published,
-    file: file ? { url: file.url, filename: file.filename, size: file.size } : null,
+    file:
+      file && isValidJarName(file.filename)
+        ? {
+            url: isAllowedDownload('modrinth', file.url) ? file.url : null,
+            externalUrl: null,
+            filename: file.filename,
+            size: file.size,
+            hashes: { sha1: file.hashes.sha1, sha512: file.hashes.sha512 },
+            fingerprint: null,
+          }
+        : null,
+    platformFiles: null,
+    dependencies: (version.dependencies ?? []).flatMap((dependency) => {
+      const kind = DEPENDENCY_KINDS[dependency.dependency_type];
+      return kind && dependency.project_id
+        ? [{ projectId: dependency.project_id, name: null, kind, externalUrl: null, platform: null }]
+        : [];
+    }),
   };
 }
 
 /** Every version of a project, newest first. */
 export async function getProjectVersions(idOrSlug: string): Promise<PluginVersion[]> {
-  return (await request<Version[]>(`/project/${encodeURIComponent(idOrSlug)}/version`)).map(mapVersion);
+  return (await request<Version[]>(`/project/${encodeURIComponent(idOrSlug)}/version`)).map((version) =>
+    mapVersion(version),
+  );
 }
 
-/**
- * Identifies jars by SHA-1 hash. Returns the matching version and project per hash; unknown hashes
- * are absent from the result.
- */
-export async function identifyByHashes(
-  sha1Hashes: string[],
-): Promise<Map<string, { version: PluginVersion; project: PluginSummary }>> {
-  const matches = new Map<string, { version: PluginVersion; project: PluginSummary }>();
+export interface Identified {
+  version: PluginVersion;
+  project: PluginSummary;
+}
+
+/** Identifies jars by SHA-1 hash; unknown hashes are absent from the result. */
+export async function identifyByHashes(sha1Hashes: string[]): Promise<Map<string, Identified>> {
+  const matches = new Map<string, Identified>();
   if (sha1Hashes.length === 0) return matches;
 
-  const versions = await request<Record<string, Version>>('/version_files', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ hashes: sha1Hashes, algorithm: 'sha1' }),
-  });
+  const versions = await postJson<Record<string, Version>>('/version_files', { hashes: sha1Hashes, algorithm: 'sha1' });
 
   const projectIds = [...new Set(Object.values(versions).map((version) => version.project_id))];
   const projects =
@@ -253,9 +302,42 @@ export async function identifyByHashes(
   for (const [hash, version] of Object.entries(versions)) {
     const project = projectsById.get(version.project_id);
     // Search results carry the author; batch project lookups do not, so it stays empty here.
-    if (project) matches.set(hash, { version: mapVersion(version), project: summarize(project, '') });
+    if (project) matches.set(hash, { version: mapVersion(version, hash), project: summarize(project, '') });
   }
   return matches;
+}
+
+/**
+ * The newest version for each SHA-1 that runs on `loaders` and `gameVersions` (empty: any version), limited to
+ * `channels`. A hash whose newest version is itself maps to that same version.
+ */
+export async function latestVersions(
+  sha1Hashes: string[],
+  loaders: string[],
+  gameVersions: string[],
+  channels: VersionChannel[],
+): Promise<Map<string, PluginVersion>> {
+  const latest = new Map<string, PluginVersion>();
+  if (sha1Hashes.length === 0) return latest;
+
+  const versions = await postJson<Record<string, Version>>('/version_files/update', {
+    hashes: sha1Hashes,
+    algorithm: 'sha1',
+    loaders,
+    game_versions: gameVersions,
+    version_types: channels,
+  });
+  for (const [hash, version] of Object.entries(versions)) latest.set(hash, mapVersion(version));
+  return latest;
+}
+
+/** The Modrinth version that publishes the exact file with this SHA-1, if any (used for CurseForge files). */
+export async function versionWithFile(sha1: string): Promise<PluginVersion | null> {
+  const versions = await postJson<Record<string, Version>>('/version_files', { hashes: [sha1], algorithm: 'sha1' });
+  const version = versions[sha1];
+  if (!version) return null;
+  const mapped = mapVersion(version, sha1);
+  return mapped.file?.hashes.sha1 === sha1 ? mapped : null;
 }
 
 /** Minecraft release versions, newest first. */

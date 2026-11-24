@@ -1,17 +1,17 @@
+import { z } from 'zod';
 import { axiosInstance } from '@/api/axios.ts';
-import createDirectory from '@/api/server/files/createDirectory.ts';
 import deleteFiles from '@/api/server/files/deleteFiles.ts';
-import getFileFingerprint from '@/api/server/files/getFileFingerprint.ts';
 import renameFiles from '@/api/server/files/renameFiles.ts';
+import { parseFromApi } from '@/lib/serialization/api-transform.ts';
 import type { PluginSummary, PluginVersion } from './catalog.ts';
+import type { InstalledRecord } from './stateFormat.ts';
 import { identifyByFingerprints } from './curseforge.ts';
+import { DISABLED_SUFFIX, jarNameOf } from './fileRules.ts';
+import * as hangar from './hangar.ts';
 import { identifyByHashes } from './modrinth.ts';
-import { type DirectoryEntry, listDirectory, mapConcurrent } from './serverFiles.ts';
+import { forgetInstalled, readStateFile } from './stateFile.ts';
 
 export const PLUGINS_DIRECTORY = '/plugins';
-
-/** Suffix that keeps a jar in the plugins folder without the server loading it. */
-export const DISABLED_SUFFIX = '.disabled';
 
 export interface InstalledPlugin {
   /** Name on disk, including the disabled suffix when present. */
@@ -21,134 +21,174 @@ export interface InstalledPlugin {
   enabled: boolean;
   size: number;
   modified: Date;
-  /** Matching published version, `null` when the jar is on neither Modrinth nor CurseForge. */
+  sha1: string | null;
+  sha256: string | null;
+  /** CurseForge fingerprint (decimal). */
+  fingerprint: string | null;
+  /** Matching published version, `null` when the jar is not identified. */
   version: PluginVersion | null;
   project: PluginSummary | null;
+  /** CurseForge: the project's newest files; Hangar: the project's versions. Used for the update check. */
+  latestFiles: PluginVersion[] | null;
+  /** Hangar: the install record that identified this jar. */
+  record: InstalledRecord | null;
 }
 
-type Fingerprint = 'sha1' | 'curseforge';
-
-// Hashing asks the node to read every jar, so results are reused while a file stays unchanged.
-// Keyed by jar name so enabling/disabling (a rename) does not force a re-hash.
-const fingerprintCache = new Map<string, string>();
-
-async function fingerprintOf(uuid: string, entry: DirectoryEntry, jarName: string, algorithm: Fingerprint) {
-  const key = `${uuid}:${algorithm}:${jarName}:${entry.size}:${entry.modified.getTime()}`;
-  const cached = fingerprintCache.get(key);
-  if (cached) return cached;
-
-  const value = await getFileFingerprint(uuid, `${PLUGINS_DIRECTORY}/${entry.name}`, algorithm).catch(() => null);
-  if (value) fingerprintCache.set(key, value);
-  return value;
+export interface InstalledPlugins {
+  plugins: InstalledPlugin[];
+  /** Files an interrupted switch or upload left behind (`*.jar.backup`, `.mcpi-upload-*`). */
+  leftovers: string[];
+  /** Whether jars could be hashed (needs `files.read-content`), i.e. identified at all. */
+  hashed: boolean;
 }
 
-const jarNameOf = (fileName: string) =>
-  fileName.endsWith(DISABLED_SUFFIX) ? fileName.slice(0, -DISABLED_SUFFIX.length) : fileName;
-
-/**
- * Plugin jars in the server's plugins folder. Jars are identified on Modrinth by SHA-1 and, when
- * CurseForge is configured, the rest on CurseForge by its fingerprint.
- */
-export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: boolean): Promise<InstalledPlugin[]> {
-  const entries = (await listDirectory(uuid, PLUGINS_DIRECTORY)) ?? [];
-  const jars = entries.filter(
-    (entry) => entry.file && (entry.name.endsWith('.jar') || entry.name.endsWith(`.jar${DISABLED_SUFFIX}`)),
-  );
-
-  const sha1s = await mapConcurrent(jars, 6, (entry) => fingerprintOf(uuid, entry, jarNameOf(entry.name), 'sha1'));
-  const onModrinth = await identifyByHashes(sha1s.filter((hash): hash is string => hash !== null));
-  const identified = jars.map((_, index) => (sha1s[index] && onModrinth.get(sha1s[index])) || null);
-
-  if (curseforgeEnabled) {
-    const unknown = jars.flatMap((entry, index) => (identified[index] ? [] : [index]));
-    const fingerprints = await mapConcurrent(unknown, 6, (index) =>
-      fingerprintOf(uuid, jars[index], jarNameOf(jars[index].name), 'curseforge'),
-    );
-    const onCurseforge = await identifyByFingerprints(
-      uuid,
-      fingerprints.filter((fingerprint): fingerprint is string => fingerprint !== null),
-    );
-    unknown.forEach((jarIndex, index) => {
-      identified[jarIndex] = (fingerprints[index] && onCurseforge.get(fingerprints[index])) || null;
-    });
-  }
-
-  return jars
-    .map((entry, index) => ({
-      fileName: entry.name,
-      jarName: jarNameOf(entry.name),
-      enabled: !entry.name.endsWith(DISABLED_SUFFIX),
-      size: entry.size,
-      modified: entry.modified,
-      version: identified[index]?.version ?? null,
-      project: identified[index]?.project ?? null,
-    }))
-    .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
-}
+const listingSchema = z.object({
+  plugins: z.array(
+    z.object({
+      fileName: z.string(),
+      enabled: z.boolean(),
+      size: z.number(),
+      modified: z.string(),
+      sha1: z.string().nullable(),
+      sha256: z.string().nullable(),
+      curseforge: z.string().nullable(),
+    }),
+  ),
+  leftovers: z.array(z.string()),
+  hashed: z.boolean(),
+});
 
 export const pluginDisplayName = (plugin: InstalledPlugin) =>
-  plugin.project?.title ?? plugin.jarName.replace(/\.jar$/, '');
+  plugin.project?.title ?? plugin.jarName.replace(/\.jar$/i, '');
 
-export async function setPluginEnabled(uuid: string, plugin: InstalledPlugin, enabled: boolean) {
-  await renameFiles({
-    uuid,
-    root: PLUGINS_DIRECTORY,
-    files: [{ from: plugin.fileName, to: enabled ? plugin.jarName : `${plugin.jarName}${DISABLED_SUFFIX}` }],
+/** Hangar has no hash lookup: jars are recognised by the record written when they were installed from here. */
+async function identifyHangar(uuid: string, records: InstalledRecord[], unknown: InstalledPlugin[]) {
+  const matched = unknown.flatMap((plugin) => {
+    const record = records.find((entry) => plugin.sha256 && entry.sha256 === plugin.sha256);
+    return record ? [{ plugin, record }] : [];
   });
+
+  const projectIds = [...new Set(matched.map(({ record }) => record.project))];
+  const projects = await Promise.all(
+    projectIds.map(async (id) => {
+      try {
+        const [project, versions] = await Promise.all([
+          hangar.getProject(uuid, id),
+          hangar.getProjectVersions(uuid, id),
+        ]);
+        return [id, { project, versions }] as const;
+      } catch {
+        return [id, null] as const;
+      }
+    }),
+  );
+  const byId = new Map(projects);
+
+  for (const { plugin, record } of matched) {
+    const found = byId.get(record.project);
+    if (!found) continue;
+    plugin.project = found.project;
+    plugin.latestFiles = found.versions;
+    plugin.version = found.versions.find((version) => version.id === record.version) ?? null;
+    plugin.record = record;
+  }
+}
+
+/**
+ * Plugin jars in the server's plugins folder, hashed by this extension's backend. Jars are identified on Modrinth by
+ * SHA-1, then on CurseForge by fingerprint (when configured), then by Hangar install records.
+ */
+export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: boolean): Promise<InstalledPlugins> {
+  const { data } = await axiosInstance.get(`/api/client/servers/${uuid}/mcplugins/plugins`);
+  const listing = parseFromApi(listingSchema, data);
+
+  const plugins: InstalledPlugin[] = listing.plugins.map((entry) => ({
+    fileName: entry.fileName,
+    jarName: jarNameOf(entry.fileName),
+    enabled: entry.enabled,
+    size: entry.size,
+    modified: new Date(entry.modified),
+    sha1: entry.sha1,
+    sha256: entry.sha256?.toLowerCase() ?? null,
+    fingerprint: entry.curseforge,
+    version: null,
+    project: null,
+    latestFiles: null,
+    record: null,
+  }));
+
+  if (listing.hashed) {
+    const onModrinth = await identifyByHashes(plugins.flatMap((plugin) => (plugin.sha1 ? [plugin.sha1] : [])));
+    for (const plugin of plugins) {
+      const match = plugin.sha1 ? onModrinth.get(plugin.sha1) : undefined;
+      if (match) Object.assign(plugin, match);
+    }
+
+    if (curseforgeEnabled) {
+      const unknown = plugins.filter((plugin) => !plugin.project && plugin.fingerprint);
+      const onCurseforge = await identifyByFingerprints(
+        uuid,
+        unknown.map((plugin) => plugin.fingerprint!),
+      );
+      for (const plugin of unknown) {
+        const match = onCurseforge.get(plugin.fingerprint!);
+        if (match) Object.assign(plugin, match);
+      }
+    }
+
+    const unknown = plugins.filter((plugin) => !plugin.project);
+    if (unknown.length > 0) {
+      const records = await readStateFile(uuid)
+        .then(({ state }) => state.installed)
+        .catch((): InstalledRecord[] => []);
+      if (records.length > 0) await identifyHangar(uuid, records, unknown);
+    }
+  }
+
+  return {
+    plugins: plugins.sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b))),
+    leftovers: listing.leftovers,
+    hashed: listing.hashed,
+  };
+}
+
+/** Core file routes skip files on a subuser's ignore list and report 0 instead of failing. */
+export class FileActionError extends Error {
+  readonly kind: 'rename' | 'delete' | 'exists';
+  readonly fileName: string;
+
+  constructor(kind: 'rename' | 'delete' | 'exists', fileName: string) {
+    super(`${kind}: ${fileName}`);
+    this.kind = kind;
+    this.fileName = fileName;
+  }
+}
+
+export async function renameInPlugins(uuid: string, from: string, to: string) {
+  const { renamed } = await renameFiles({ uuid, root: PLUGINS_DIRECTORY, files: [{ from, to }] });
+  if (!renamed) throw new FileActionError('rename', from);
+}
+
+export async function deleteInPlugins(uuid: string, fileName: string) {
+  const { deleted } = await deleteFiles(uuid, PLUGINS_DIRECTORY, [fileName]);
+  if (!deleted) throw new FileActionError('delete', fileName);
+}
+
+export async function setPluginEnabled(
+  uuid: string,
+  plugin: InstalledPlugin,
+  enabled: boolean,
+  existing: readonly string[],
+) {
+  const target = enabled ? plugin.jarName : `${plugin.jarName}${DISABLED_SUFFIX}`;
+  // Enabling `x.jar.disabled` next to an existing `x.jar` would overwrite it.
+  if (existing.some((name) => name.toLowerCase() === target.toLowerCase())) {
+    throw new FileActionError('exists', target);
+  }
+  await renameInPlugins(uuid, plugin.fileName, target);
 }
 
 export async function deletePlugin(uuid: string, plugin: InstalledPlugin) {
-  await deleteFiles(uuid, PLUGINS_DIRECTORY, [plugin.fileName]);
-}
-
-/** Downloads a file into the plugins folder and resolves once the node has finished writing it. */
-async function pullIntoPlugins(uuid: string, url: string, name: string) {
-  await axiosInstance.post(`/api/client/servers/${uuid}/files/pull`, {
-    root: PLUGINS_DIRECTORY,
-    url,
-    name,
-    foreground: true,
-  });
-}
-
-/**
- * Installs `version` into the plugins folder. When `replacing` is given (switching versions or
- * reinstalling), the old jar is removed only after the new one is on disk, and the new jar keeps
- * the old one's enabled/disabled state.
- */
-export async function installPluginVersion(uuid: string, version: PluginVersion, replacing: InstalledPlugin | null) {
-  const file = version.file;
-  if (!file) throw new Error(`Version ${version.versionNumber} has no downloadable jar.`);
-  if (!file.url) {
-    throw new Error(`The author of this plugin does not allow third-party downloads of ${version.versionNumber}.`);
-  }
-
-  const jarName = file.filename.replace(/[/\\]/g, '_');
-  const targetName = replacing && !replacing.enabled ? `${jarName}${DISABLED_SUFFIX}` : jarName;
-
-  if ((await listDirectory(uuid, PLUGINS_DIRECTORY)) === null) {
-    await createDirectory(uuid, '/', PLUGINS_DIRECTORY.slice(1));
-  }
-
-  if (!replacing) {
-    await pullIntoPlugins(uuid, file.url, targetName);
-    return;
-  }
-
-  if (replacing.fileName !== targetName) {
-    await pullIntoPlugins(uuid, file.url, targetName);
-    await deleteFiles(uuid, PLUGINS_DIRECTORY, [replacing.fileName]);
-    return;
-  }
-
-  // Same file name for both versions: move the old jar aside so a failed download can be undone.
-  const backupName = `${replacing.fileName}.backup`;
-  await renameFiles({ uuid, root: PLUGINS_DIRECTORY, files: [{ from: replacing.fileName, to: backupName }] });
-  try {
-    await pullIntoPlugins(uuid, file.url, targetName);
-  } catch (error) {
-    await renameFiles({ uuid, root: PLUGINS_DIRECTORY, files: [{ from: backupName, to: replacing.fileName }] });
-    throw error;
-  }
-  await deleteFiles(uuid, PLUGINS_DIRECTORY, [backupName]);
+  await deleteInPlugins(uuid, plugin.fileName);
+  if (plugin.record) await forgetInstalled(uuid, [plugin.record.file]).catch(() => undefined);
 }

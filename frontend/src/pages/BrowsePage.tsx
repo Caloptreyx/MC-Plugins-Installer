@@ -26,8 +26,20 @@ import InstallPluginModal from '../components/InstallPluginModal.tsx';
 import PluginCard from '../components/PluginCard.tsx';
 import PluginsLayout from '../components/PluginsLayout.tsx';
 import ProviderMark from '../components/ProviderMark.tsx';
-import { type PluginSource, type PluginSummary, projectKey, type SearchSort, searchPlugins } from '../lib/catalog.ts';
-import { compatibleLoaders, isPluginLoader, loaderLabel, loaderSelectData, runsOn } from '../lib/loaders.ts';
+import { useErrorMessage } from '../components/useErrorMessage.ts';
+import { useLoaderOptions } from '../components/useLoaderOptions.ts';
+import {
+  hangarPlatformFor,
+  isPluginSource,
+  PLUGIN_SOURCES,
+  type PluginSource,
+  type PluginSummary,
+  projectKey,
+  type SearchSort,
+  searchPlugins,
+} from '../lib/catalog.ts';
+import { HANGAR_CATEGORIES, type HangarCategory } from '../lib/hangar.ts';
+import { isPluginLoader, isProxyLoader, loaderLabel, runsOn } from '../lib/loaders.ts';
 import {
   pluginQueryKeys,
   useCategories,
@@ -37,35 +49,38 @@ import {
   useInstalledPlugins,
 } from '../lib/queries.ts';
 import { pluginDetailsUrl } from '../lib/routes.ts';
+import { useExtTranslations } from '../translations.ts';
 
 const PER_PAGE = 18;
+/** Hangar pages hold at most 25 results. */
+const HANGAR_PER_PAGE = 24;
 
 const SORTS: SearchSort[] = ['relevance', 'downloads', 'follows', 'newest', 'updated'];
 
-const sortLabel = (sort: SearchSort, source: PluginSource) =>
-  ({
-    relevance: 'Relevance',
-    downloads: 'Downloads',
-    // CurseForge has no followers; its equivalent order is by rating.
-    follows: source === 'curseforge' ? 'Rating' : 'Followers',
-    newest: 'Newest',
-    updated: 'Recently updated',
-  })[sort];
+const isHangarCategory = (value: string): value is HangarCategory =>
+  (HANGAR_CATEGORIES as readonly string[]).includes(value);
 
 export default function BrowsePage() {
+  const { t: tExt } = useExtTranslations();
   const server = useServerStore((state) => state.server);
   const navigate = useNavigate();
+  const errorMessage = useErrorMessage();
   const [params, setParams] = useSearchParams();
   const detection = useDetection();
   const curseforge = useCurseforgeEnabled();
   const { byProject } = useInstalledPlugins();
   const { data: gameVersions = [] } = useGameVersions();
 
-  const source: PluginSource = curseforge.enabled && params.get('source') === 'curseforge' ? 'curseforge' : 'modrinth';
+  const requestedSource = params.get('source');
+  const source: PluginSource =
+    isPluginSource(requestedSource) && (requestedSource !== 'curseforge' || curseforge.enabled)
+      ? requestedSource
+      : 'modrinth';
   const { data: categories = [] } = useCategories(source);
 
   const detectedLoader = detection.data?.loader ?? null;
-  const detectedVersion = detection.data?.minecraftVersion ?? null;
+  const loaderOptions = useLoaderOptions(detectedLoader);
+  const detectedVersion = detection.data?.versionApplicable ? (detection.data.minecraftVersion?.value ?? null) : null;
   const canMatch = !!detectedLoader || !!detectedVersion;
   // Filtering by the detected server is the default; `match=0` turns it off.
   const matchServer = canMatch && params.get('match') !== '0';
@@ -75,7 +90,9 @@ export default function BrowsePage() {
     : requestedLoader && isPluginLoader(requestedLoader)
       ? requestedLoader
       : null;
-  const gameVersion = matchServer ? detectedVersion : params.get('version');
+  // Proxies run plugins for every Minecraft version.
+  const versionFilter = !loader || !isProxyLoader(loader);
+  const gameVersion = !versionFilter ? null : matchServer ? detectedVersion : params.get('version');
   const category = params.get('category');
   const page = Math.max(1, Number.parseInt(params.get('page') ?? '1', 10) || 1);
   const query = params.get('q') ?? '';
@@ -109,17 +126,21 @@ export default function BrowsePage() {
     if (debouncedSearch !== query) update({ q: debouncedSearch });
   }, [debouncedSearch]);
 
-  // CurseForge only has a "Bukkit Plugins" section, which nothing outside the Bukkit family runs.
-  const unsupportedLoader = source === 'curseforge' && loader && !runsOn(['bukkit'], loader) ? loader : null;
+  // CurseForge only has a "Bukkit Plugins" section; Hangar only has Paper, Velocity and Waterfall downloads.
+  const unsupportedLoader =
+    loader &&
+    ((source === 'curseforge' && !runsOn(['bukkit'], loader)) || (source === 'hangar' && !hangarPlatformFor(loader)))
+      ? loader
+      : null;
 
   const searchParams = {
     query,
-    loaders: loader ? compatibleLoaders(loader) : [],
+    loader,
     gameVersion,
     category,
     sort,
     page,
-    perPage: PER_PAGE,
+    perPage: source === 'hangar' ? HANGAR_PER_PAGE : PER_PAGE,
   };
 
   const results = useQuery({
@@ -132,6 +153,14 @@ export default function BrowsePage() {
 
   const hasFilters = !!(query || loader || gameVersion || category);
 
+  const categoryLabel = (id: string, name: string) =>
+    source === 'hangar' && isHangarCategory(id) ? tExt(`pages.server.plugins.hangarCategories.${id}`, {}) : name;
+
+  const sortLabel = (value: SearchSort) =>
+    value === 'follows'
+      ? tExt(`pages.server.plugins.browse.sort.follows.${source}`, {})
+      : tExt(`pages.server.plugins.browse.sort.${value}`, {});
+
   return (
     <PluginsLayout tab='browse'>
       <Stack gap='md'>
@@ -141,13 +170,13 @@ export default function BrowsePage() {
               <SegmentedControl
                 value={source}
                 onChange={(value) => update({ source: value === 'modrinth' ? null : value, category: null })}
-                data={(['modrinth', 'curseforge'] as const).map((value) => ({
+                data={PLUGIN_SOURCES.map((value) => ({
                   value,
                   disabled: value === 'curseforge' && !curseforge.enabled,
                   label: (
                     <ConditionalTooltip
                       enabled={value === 'curseforge' && !curseforge.enabled}
-                      label='An administrator has not set up CurseForge.'
+                      label={tExt('pages.server.plugins.browse.curseforgeDisabled', {})}
                     >
                       <ProviderMark source={value} />
                     </ConditionalTooltip>
@@ -156,17 +185,17 @@ export default function BrowsePage() {
               />
               <TextInput
                 style={{ flex: 1, minWidth: 220 }}
-                placeholder='Search plugins…'
+                placeholder={tExt('pages.server.plugins.browse.searchPlaceholder', {})}
                 leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
               <Select
                 w={190}
-                aria-label='Sort by'
+                aria-label={tExt('pages.server.plugins.browse.sortLabel', {})}
                 value={sort}
                 onChange={(value) => update({ sort: value })}
-                data={SORTS.map((value) => ({ value, label: sortLabel(value, source) }))}
+                data={SORTS.map((value) => ({ value, label: sortLabel(value) }))}
               />
             </Group>
 
@@ -174,45 +203,50 @@ export default function BrowsePage() {
               <Select
                 w={170}
                 clearable
-                aria-label='Plugin Loader'
-                placeholder='Any loader'
+                aria-label={tExt('pages.server.plugins.browse.loaderLabel', {})}
+                placeholder={tExt('pages.server.plugins.common.anyLoader', {})}
                 value={loader}
                 disabled={matchServer}
                 onChange={(value) => update({ loader: value })}
-                data={loaderSelectData(detectedLoader)}
+                data={loaderOptions}
               />
-              <Select
-                w={170}
-                clearable
-                searchable
-                aria-label='Minecraft version'
-                placeholder='Any version'
-                value={gameVersion}
-                disabled={matchServer}
-                onChange={(value) => update({ version: value })}
-                data={
-                  gameVersion && !gameVersions.includes(gameVersion) ? [gameVersion, ...gameVersions] : gameVersions
-                }
-              />
+              {versionFilter && (
+                <Select
+                  w={170}
+                  clearable
+                  searchable
+                  aria-label={tExt('pages.server.plugins.browse.gameVersionLabel', {})}
+                  placeholder={tExt('pages.server.plugins.common.anyVersion', {})}
+                  value={gameVersion}
+                  disabled={matchServer}
+                  onChange={(value) => update({ version: value })}
+                  data={
+                    gameVersion && !gameVersions.includes(gameVersion) ? [gameVersion, ...gameVersions] : gameVersions
+                  }
+                />
+              )}
               <Select
                 w={190}
                 clearable
                 searchable
-                aria-label='Category'
-                placeholder='Any category'
+                aria-label={tExt('pages.server.plugins.browse.categoryLabel', {})}
+                placeholder={tExt('pages.server.plugins.browse.anyCategory', {})}
                 value={category}
                 onChange={(value) => update({ category: value })}
-                data={categories.map((option) => ({ value: option.id, label: option.name }))}
+                data={categories.map((option) => ({ value: option.id, label: categoryLabel(option.id, option.name) }))}
               />
               {canMatch && (
                 <ConditionalTooltip
                   enabled
-                  label={`Only show plugins for ${detectedLoader ? loaderLabel(detectedLoader) : 'any loader'} on ${
-                    detectedVersion ? `Minecraft ${detectedVersion}` : 'any Minecraft version'
-                  }`}
+                  label={tExt('pages.server.plugins.browse.matchServerHint', {
+                    loader: detectedLoader
+                      ? loaderLabel(detectedLoader)
+                      : tExt('pages.server.plugins.common.anyLoader', {}),
+                    version: detectedVersion ?? tExt('pages.server.plugins.common.anyVersion', {}),
+                  })}
                 >
                   <Switch
-                    label='Match server'
+                    label={tExt('pages.server.plugins.browse.matchServer', {})}
                     checked={matchServer}
                     onChange={(event) => update({ match: event.currentTarget.checked ? null : '0' })}
                   />
@@ -228,7 +262,7 @@ export default function BrowsePage() {
                     update({ q: null, loader: null, version: null, category: null, match: '0' });
                   }}
                 >
-                  Clear filters
+                  {tExt('pages.server.plugins.browse.clearFilters', {})}
                 </Button>
               )}
             </Group>
@@ -239,15 +273,18 @@ export default function BrowsePage() {
           <Alert
             color='yellow'
             icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
-            title='Not available on CurseForge'
+            title={tExt('pages.server.plugins.browse.unsupported.title', {})}
           >
             <Text size='sm'>
-              CurseForge only lists Bukkit plugins, which do not run on {loaderLabel(unsupportedLoader)}. Browse
-              Modrinth instead, or pick a Bukkit-based loader (Paper, Purpur, Spigot or Bukkit).
+              {source === 'curseforge'
+                ? tExt('pages.server.plugins.browse.unsupported.curseforge', {
+                    loader: loaderLabel(unsupportedLoader),
+                  })
+                : tExt('pages.server.plugins.browse.unsupported.hangar', { loader: loaderLabel(unsupportedLoader) })}
             </Text>
           </Alert>
         ) : results.error ? (
-          <Alert color='red'>{results.error.message}</Alert>
+          <Alert color='red'>{errorMessage(results.error)}</Alert>
         ) : !results.data ? (
           <SimpleGrid cols={{ base: 1, md: 2, xl: 3 }}>
             {Array.from({ length: 6 }, (_, index) => (
@@ -257,14 +294,14 @@ export default function BrowsePage() {
         ) : results.data.total === 0 ? (
           <EmptyState
             icon={faBoxOpen}
-            title='No plugins found'
-            description='Try another search term, or loosen the loader, version and category filters.'
+            title={tExt('pages.server.plugins.browse.empty.title', {})}
+            description={tExt('pages.server.plugins.browse.empty.description', {})}
           />
         ) : (
           <>
             <Group justify='space-between'>
               <Text size='sm' c='dimmed'>
-                {results.data.total.toLocaleString()} plugins
+                {tExt('pages.server.plugins.browse.total', { count: results.data.total.toLocaleString() })}
               </Text>
               <Pagination data={results.data} onPageSelect={(next) => update({ page: String(next) }, false)} />
             </Group>
@@ -295,6 +332,7 @@ export default function BrowsePage() {
         project={{
           source: installTarget?.source ?? source,
           id: installTarget?.id ?? '',
+          slug: installTarget?.slug ?? '',
           title: installTarget?.title ?? '',
           iconUrl: installTarget?.iconUrl ?? null,
         }}

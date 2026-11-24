@@ -5,9 +5,11 @@ import AdminConfigPage from './pages/AdminConfigPage.tsx';
 import BrowsePage from './pages/BrowsePage.tsx';
 import ManagePage from './pages/ManagePage.tsx';
 import PluginDetailsPage from './pages/PluginDetailsPage.tsx';
+import { getExtTranslations } from './translations.ts';
 
-// Detection and plugin identification read files (and hash them), so every page needs read-content.
-const PERMISSION = 'files.read-content';
+// Browsing and listing only need `files.read`; identifying jars, reading logs and the override file use
+// `files.read-content` when the user has it, and installs/changes are checked against the core file permissions.
+const PERMISSION = 'files.read';
 
 class McPluginsInstallerExtension extends Extension {
   public cardConfigurationPage: React.FC | null = AdminConfigPage;
@@ -17,7 +19,7 @@ class McPluginsInstallerExtension extends Extension {
     ctx.extensionRegistry.enterRoutes((routes) =>
       routes
         .addServerRoute({
-          name: 'Plugins',
+          name: () => getExtTranslations().t('pages.server.plugins.title', {}),
           icon: faPlug,
           path: '/plugins',
           element: BrowsePage,

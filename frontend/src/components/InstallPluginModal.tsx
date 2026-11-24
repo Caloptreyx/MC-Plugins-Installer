@@ -1,12 +1,13 @@
 import { faCodeBranch, faDownload, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { Center, Group, SimpleGrid, Stack } from '@mantine/core';
+import { useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
-import { httpErrorToHuman } from '@/api/axios.ts';
 import Button from '@/elements/buttons/Button.tsx';
 import Alert from '@/elements/feedback/Alert.tsx';
 import Spinner from '@/elements/feedback/Spinner.tsx';
 import Select from '@/elements/input/Select.tsx';
+import Switch from '@/elements/input/Switch.tsx';
 import { Modal, ModalFooter } from '@/elements/modals/Modal.tsx';
 import ConditionalTooltip from '@/elements/overlays/ConditionalTooltip.tsx';
 import Text from '@/elements/typography/Text.tsx';
@@ -14,25 +15,38 @@ import { bytesToString } from '@/lib/format/size.ts';
 import { useServerCan } from '@/plugins/usePermissions.ts';
 import { useToast } from '@/providers/ToastProvider.tsx';
 import { useServerStore } from '@/stores/server.ts';
-import type { PluginSource, PluginVersion } from '../lib/catalog.ts';
-import { newestFirst } from '../lib/format.ts';
+import type { InstalledPlugin } from '../lib/plugins.ts';
 import {
-  isPluginLoader,
-  loaderLabel,
-  loaderSelectData,
-  PLUGIN_LOADER_IDS,
-  type PluginLoader,
-  runsOn,
-} from '../lib/loaders.ts';
-import { type InstalledPlugin, installPluginVersion } from '../lib/plugins.ts';
-import { useDetection, useProjectVersions, useRefreshInstalledPlugins } from '../lib/queries.ts';
-import { CHANNEL_LABELS } from './ChannelBadge.tsx';
+  compatibleVersions,
+  fileAvailability,
+  fileFor,
+  getProjectVersions,
+  type PluginSource,
+  type PluginVersion,
+  preferredVersion,
+} from '../lib/catalog.ts';
+import { newestFirst } from '../lib/format.ts';
+import { InstallError, installPluginVersion } from '../lib/install.ts';
+import { isPluginLoader, loaderLabel, PLUGIN_LOADER_IDS, type PluginLoader, runsOn } from '../lib/loaders.ts';
+import {
+  pluginQueryKeys,
+  useDetection,
+  useInstalledPlugins,
+  useProjectVersions,
+  useRefreshInstalledPlugins,
+} from '../lib/queries.ts';
+import { useExtTranslations } from '../translations.ts';
+import DependencyList, { useDependencies } from './DependencyList.tsx';
+import ManualDownloadPanel from './ManualDownloadPanel.tsx';
 import PluginIcon from './PluginIcon.tsx';
 import ProviderMark from './ProviderMark.tsx';
+import { useErrorMessage } from './useErrorMessage.ts';
+import { useLoaderOptions } from './useLoaderOptions.ts';
 
 export interface InstallTarget {
   source: PluginSource;
   id: string;
+  slug: string;
   title: string;
   iconUrl: string | null;
 }
@@ -43,34 +57,36 @@ interface Props {
   project: InstallTarget;
   /** The copy of this plugin already on the server; installing replaces it. */
   installed: InstalledPlugin | null;
-  /** Version to preselect, e.g. when installing from a row of the Versions table. */
+  /** Version to preselect, e.g. when installing from a row of the Versions table or updating. */
   initialVersionId?: string | null;
 }
 
-/** Newest installable release among `candidates`, then the newest installable pre-release, then the newest. */
-function preferredVersion(candidates: PluginVersion[]) {
-  const installable = candidates.filter((version) => version.file?.url);
-  return installable.find((version) => version.channel === 'release') ?? installable[0] ?? candidates[0] ?? null;
-}
-
 function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Props, 'opened'>) {
+  const { t: tExt, tReact } = useExtTranslations();
   const uuid = useServerStore((state) => state.server.uuid);
+  const queryClient = useQueryClient();
   const { addToast } = useToast();
+  const errorMessage = useErrorMessage();
   const refreshInstalled = useRefreshInstalledPlugins();
   const canCreate = useServerCan('files.create');
+  const canUpdate = useServerCan('files.update');
   const canDelete = useServerCan('files.delete');
   const detection = useDetection();
+  const { byProject } = useInstalledPlugins();
   const versionsQuery = useProjectVersions(project.source, project.id);
 
   const versions = versionsQuery.data ?? [];
   const detectedLoader = detection.data?.loader ?? null;
-  const detectedVersion = detection.data?.minecraftVersion ?? null;
+  const loaderOptions = useLoaderOptions(detectedLoader);
+  const detectedVersion = detection.data?.versionApplicable ? (detection.data.minecraftVersion?.value ?? null) : null;
   const initialVersion = versions.find((version) => version.id === initialVersionId) ?? null;
 
   // `undefined` means "not touched yet": the value then follows the detected server defaults.
   const [loaderChoice, setLoaderChoice] = useState<PluginLoader>();
   const [gameVersionChoice, setGameVersionChoice] = useState<string | null>();
   const [versionChoice, setVersionChoice] = useState<string | null>(initialVersionId ?? null);
+  const [preReleasesChoice, setPreReleasesChoice] = useState<boolean>();
+  const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [installing, setInstalling] = useState(false);
 
   const supportedLoaders = useMemo(
@@ -78,37 +94,35 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
     [versions],
   );
 
-  const defaultLoader: PluginLoader | null = initialVersion
-    ? detectedLoader && runsOn(initialVersion.loaders, detectedLoader)
-      ? detectedLoader
-      : (initialVersion.loaders.find(isPluginLoader) ?? null)
-    : (detectedLoader ?? supportedLoaders[0] ?? null);
-  const loader = loaderChoice ?? defaultLoader;
+  // A detected platform is binding: builds for other platforms are blocked (the server software panel can override it).
+  const loader: PluginLoader | null =
+    detectedLoader ??
+    loaderChoice ??
+    (initialVersion ? (initialVersion.loaders.find(isPluginLoader) ?? null) : (supportedLoaders[0] ?? null));
 
   const gameVersionsForLoader = useMemo(
-    () =>
-      newestFirst(
-        versions
-          .filter((version) => !loader || runsOn(version.loaders, loader))
-          .flatMap((version) => version.gameVersions),
-      ),
+    () => newestFirst(compatibleVersions(versions, loader, null).flatMap((version) => version.gameVersions)),
     [versions, loader],
   );
 
   const defaultGameVersion = initialVersion
     ? detectedVersion && initialVersion.gameVersions.includes(detectedVersion)
       ? detectedVersion
-      : (initialVersion.gameVersions[0] ?? null)
+      : null
     : detectedVersion;
   const gameVersion = gameVersionChoice === undefined ? defaultGameVersion : gameVersionChoice;
+  const preReleases = preReleasesChoice ?? (!!initialVersion && initialVersion.channel !== 'release');
 
-  const candidates = versions.filter(
-    (version) =>
-      (!loader || runsOn(version.loaders, loader)) && (!gameVersion || version.gameVersions.includes(gameVersion)),
+  const candidates = compatibleVersions(versions, loader, gameVersion).filter(
+    (version) => preReleases || version.channel === 'release' || version.id === initialVersionId,
   );
-  const selected = candidates.find((version) => version.id === versionChoice) ?? preferredVersion(candidates);
-  const selectedFile = selected?.file ?? null;
+  const selected = candidates.find((version) => version.id === versionChoice) ?? preferredVersion(candidates, loader);
+  const selectedFile = selected ? fileFor(selected, loader) : null;
+  const availability = selected ? fileAvailability(selected.source, selectedFile) : 'none';
   const alreadyInstalled = !!selected && installed?.version?.id === selected.id;
+  const replacingSameName =
+    !!installed && !!selectedFile && installed.jarName.toLowerCase() === selectedFile.filename.toLowerCase();
+  const dependencyRows = useDependencies(project.source, selected, loader, byProject);
 
   if (versionsQuery.isPending || detection.isPending) {
     return (
@@ -119,57 +133,112 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
   }
 
   if (versionsQuery.isError) {
-    return <Alert color='red'>{versionsQuery.error.message}</Alert>;
+    return <Alert color='red'>{errorMessage(versionsQuery.error)}</Alert>;
   }
 
-  const install = async () => {
-    if (!selected) return;
+  /** Installs the checked dependencies one by one; stops at core's pull limit. */
+  const installDependencies = async () => {
+    const failed: string[] = [];
+    const wanted = dependencyRows.filter(
+      (row) => row.kind === 'required' && !row.installed && row.projectId && !skipped.has(row.projectId),
+    );
+    for (const dependency of wanted) {
+      const projectId = dependency.projectId!;
+      try {
+        const depVersions = await queryClient.fetchQuery({
+          queryKey: pluginQueryKeys.versions(project.source, projectId),
+          queryFn: () => getProjectVersions(project.source, uuid, projectId),
+        });
+        const version = preferredVersion(
+          compatibleVersions(depVersions, loader, gameVersion).filter((candidate) => candidate.channel === 'release'),
+          loader,
+        );
+        if (!version) throw new InstallError('noFile');
+        await installPluginVersion(uuid, version, loader, null);
+      } catch (error) {
+        failed.push(`${dependency.name}: ${errorMessage(error)}`);
+        if (error instanceof InstallError && error.kind === 'rateLimited') break;
+      }
+    }
+    return failed;
+  };
+
+  const install = async (version: PluginVersion) => {
     setInstalling(true);
     try {
-      await installPluginVersion(uuid, selected, installed);
+      await installPluginVersion(uuid, version, loader, installed);
       addToast(
-        `${project.title} ${selected.versionNumber} was ${installed ? 'switched to' : 'installed'}. Restart the server to load it.`,
+        installed
+          ? tExt('pages.server.plugins.install.toast.switched', {
+              plugin: project.title,
+              version: version.versionNumber,
+            })
+          : tExt('pages.server.plugins.install.toast.installed', {
+              plugin: project.title,
+              version: version.versionNumber,
+            }),
         'success',
       );
+      const failed = await installDependencies();
+      if (failed.length > 0) {
+        addToast(tExt('pages.server.plugins.install.toast.dependenciesFailed', { list: failed.join('; ') }), 'error');
+      }
       onClose();
-      refreshInstalled();
     } catch (error) {
-      addToast(httpErrorToHuman(error), 'error');
+      addToast(errorMessage(error), 'error');
     } finally {
       setInstalling(false);
+      refreshInstalled();
     }
   };
 
+  const wrongPlatform = !!selected && !!detectedLoader && !runsOn(selected.loaders, detectedLoader);
+
   const blockedReason = !canCreate
-    ? 'You do not have permission to create files on this server.'
+    ? tExt('pages.server.plugins.install.blocked.noCreate', {})
     : installed && !canDelete
-      ? 'Replacing a plugin requires permission to delete files on this server.'
-      : alreadyInstalled
-        ? 'This version is already installed.'
-        : null;
+      ? tExt('pages.server.plugins.install.blocked.noDelete', {})
+      : replacingSameName && !canUpdate
+        ? tExt('pages.server.plugins.install.blocked.noUpdate', {})
+        : alreadyInstalled
+          ? tExt('pages.server.plugins.install.blocked.alreadyInstalled', {})
+          : wrongPlatform
+            ? tExt('pages.server.plugins.install.blocked.wrongPlatform', {
+                platforms: selected.loaders.map(loaderLabel).join(', '),
+                server: loaderLabel(detectedLoader),
+              })
+            : availability === 'none'
+              ? tExt('pages.server.plugins.install.blocked.noFile', {})
+              : availability === 'external'
+                ? tExt('pages.server.plugins.install.blocked.external', {})
+                : null;
 
   const warnings = [
-    selected && !selectedFile ? 'This version has no jar to install.' : null,
-    selectedFile && !selectedFile.url
-      ? `The author of ${project.title} does not allow this version to be downloaded outside CurseForge. Pick another version, or download it from CurseForge and upload it to the plugins folder yourself.`
+    selected && gameVersion === null && detectedVersion && !selected.gameVersions.includes(detectedVersion)
+      ? tExt('pages.server.plugins.install.warning.gameVersion', { version: detectedVersion })
       : null,
-    selected && detectedLoader && !runsOn(selected.loaders, detectedLoader)
-      ? `This server runs ${loaderLabel(detectedLoader)}, but this version is built for ${selected.loaders.map(loaderLabel).join(', ')}. It may not load.`
-      : null,
-    selected && detectedVersion && !selected.gameVersions.includes(detectedVersion)
-      ? `This server runs Minecraft ${detectedVersion}, which this version does not list as supported.`
-      : null,
+    !detectedLoader ? tExt('pages.server.plugins.install.warning.notDetected', {}) : null,
   ].filter((warning) => warning !== null);
+
+  const versionLabel = (version: PluginVersion) => {
+    const kind = fileAvailability(version.source, fileFor(version, loader));
+    const channel = tExt(`pages.server.plugins.channel.${version.channel}`, {});
+    return kind === 'manual' || kind === 'external'
+      ? `${version.name} (${channel}, ${tExt(`pages.server.plugins.availability.${kind}`, {})})`
+      : `${version.name} (${channel})`;
+  };
 
   return (
     <Stack gap='md'>
       <SimpleGrid cols={{ base: 1, sm: 2 }}>
         <Select
           withAsterisk
-          label='Plugin Loader'
-          data={loaderSelectData(detectedLoader).map((option) => ({
+          label={tExt('pages.server.plugins.install.loader', {})}
+          description={detectedLoader ? tExt('pages.server.plugins.install.loaderDetected', {}) : undefined}
+          disabled={!!detectedLoader}
+          data={loaderOptions.map((option) => ({
             ...option,
-            disabled: !supportedLoaders.includes(option.value),
+            disabled: !supportedLoaders.includes(option.value) && option.value !== detectedLoader,
           }))}
           value={loader}
           onChange={(value) => {
@@ -177,46 +246,61 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
             setVersionChoice(null);
           }}
         />
+        {detection.data?.versionApplicable !== false && (
+          <Select
+            clearable
+            searchable
+            label={tExt('pages.server.plugins.install.gameVersion', {})}
+            placeholder={tExt('pages.server.plugins.common.anyVersion', {})}
+            data={[
+              ...(detectedVersion && !gameVersionsForLoader.includes(detectedVersion)
+                ? [
+                    {
+                      value: detectedVersion,
+                      label: tExt('pages.server.plugins.common.detectedUnsupportedOption', { value: detectedVersion }),
+                    },
+                  ]
+                : []),
+              ...gameVersionsForLoader.map((value) => ({
+                value,
+                label:
+                  value === detectedVersion ? tExt('pages.server.plugins.common.detectedOption', { value }) : value,
+              })),
+            ]}
+            value={gameVersion}
+            onChange={(value) => {
+              setGameVersionChoice(value);
+              setVersionChoice(null);
+            }}
+          />
+        )}
+      </SimpleGrid>
+
+      <Stack gap={6}>
         <Select
-          clearable
+          withAsterisk
           searchable
-          label='Minecraft version'
-          placeholder='Any version'
-          data={[
-            ...(detectedVersion && !gameVersionsForLoader.includes(detectedVersion)
-              ? [{ value: detectedVersion, label: `${detectedVersion} (detected, not supported)` }]
-              : []),
-            ...gameVersionsForLoader.map((value) => ({
-              value,
-              label: value === detectedVersion ? `${value} (detected)` : value,
-            })),
-          ]}
-          value={gameVersion}
-          onChange={(value) => {
-            setGameVersionChoice(value);
+          label={tExt('pages.server.plugins.install.version', {})}
+          data={candidates.map((version) => ({
+            value: version.id,
+            label: versionLabel(version),
+            disabled: fileAvailability(version.source, fileFor(version, loader)) === 'none',
+          }))}
+          value={selected?.id ?? null}
+          onChange={setVersionChoice}
+          disabled={candidates.length === 0}
+          error={candidates.length === 0 ? tExt('pages.server.plugins.install.noVersions', {}) : undefined}
+        />
+        <Switch
+          size='xs'
+          label={tExt('pages.server.plugins.install.preReleases', {})}
+          checked={preReleases}
+          onChange={(event) => {
+            setPreReleasesChoice(event.currentTarget.checked);
             setVersionChoice(null);
           }}
         />
-      </SimpleGrid>
-
-      <Select
-        withAsterisk
-        searchable
-        label='Plugin version'
-        data={candidates.map((version) => ({
-          value: version.id,
-          label: `${version.name} (${CHANNEL_LABELS[version.channel]})`,
-          disabled: !version.file?.url,
-        }))}
-        value={selected?.id ?? null}
-        onChange={setVersionChoice}
-        disabled={candidates.length === 0}
-        error={
-          candidates.length === 0
-            ? `No version for ${loader ? loaderLabel(loader) : 'this loader'}${gameVersion ? ` on Minecraft ${gameVersion}` : ''}.`
-            : undefined
-        }
-      />
+      </Stack>
 
       {warnings.length > 0 && (
         <Alert color='yellow' icon={<FontAwesomeIcon icon={faTriangleExclamation} />}>
@@ -230,30 +314,76 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
         </Alert>
       )}
 
-      <Text size='xs' c='dimmed'>
-        {selectedFile
-          ? `${selectedFile.filename} (${bytesToString(selectedFile.size)}) is downloaded into the plugins folder. `
-          : ''}
-        {installed && selected && !alreadyInstalled
-          ? `It replaces ${installed.fileName}${installed.enabled ? '' : ' and stays disabled'}. `
-          : ''}
-        Restart the server afterwards to load it.
-      </Text>
+      {selected && availability === 'manual' && !blockedReason && (
+        <ManualDownloadPanel
+          project={project}
+          version={selected}
+          loader={loader}
+          installed={installed}
+          onInstalled={() => {
+            refreshInstalled();
+            onClose();
+          }}
+        />
+      )}
+
+      {selected && (
+        <DependencyList
+          rows={dependencyRows}
+          skipped={skipped}
+          onToggle={(projectId, wantsInstall) =>
+            setSkipped((current) => {
+              const next = new Set(current);
+              if (wantsInstall) next.delete(projectId);
+              else next.add(projectId);
+              return next;
+            })
+          }
+        />
+      )}
+
+      {selectedFile && availability === 'download' && (
+        <Text size='xs' c='dimmed'>
+          {tReact('pages.server.plugins.install.fileHint', {
+            file: <code>{selectedFile.filename}</code>,
+            size: bytesToString(selectedFile.size),
+          })}{' '}
+          {installed && !alreadyInstalled
+            ? tReact(
+                installed.enabled
+                  ? 'pages.server.plugins.install.replaces'
+                  : 'pages.server.plugins.install.replacesDisabled',
+                { file: <code>{installed.fileName}</code> },
+              )
+            : null}{' '}
+          {tExt('pages.server.plugins.install.restartHint', {})}
+        </Text>
+      )}
+
+      {blockedReason && (
+        <Text size='sm' c='red'>
+          {blockedReason}
+        </Text>
+      )}
 
       <ModalFooter>
-        <ConditionalTooltip enabled={!!blockedReason} label={blockedReason ?? ''}>
-          <Button
-            color='blue'
-            leftSection={<FontAwesomeIcon icon={installed ? faCodeBranch : faDownload} />}
-            loading={installing}
-            disabled={!selected || !selectedFile?.url || !!blockedReason}
-            onClick={install}
-          >
-            {installed ? 'Switch version' : 'Install'}
-          </Button>
-        </ConditionalTooltip>
+        {availability !== 'manual' && (
+          <ConditionalTooltip enabled={!!blockedReason} label={blockedReason ?? ''}>
+            <Button
+              color='blue'
+              leftSection={<FontAwesomeIcon icon={installed ? faCodeBranch : faDownload} />}
+              loading={installing}
+              disabled={!selected || availability !== 'download' || !!blockedReason}
+              onClick={() => selected && install(selected)}
+            >
+              {installed
+                ? tExt('pages.server.plugins.actions.switchVersion', {})
+                : tExt('pages.server.plugins.actions.install', {})}
+            </Button>
+          </ConditionalTooltip>
+        )}
         <Button variant='default' onClick={onClose}>
-          Cancel
+          {tExt('pages.server.plugins.actions.cancel', {})}
         </Button>
       </ModalFooter>
     </Stack>
@@ -262,6 +392,7 @@ function InstallForm({ onClose, project, installed, initialVersionId }: Omit<Pro
 
 /** Picks a loader, Minecraft version and plugin version (defaulting to the detected server) and installs it. */
 export default function InstallPluginModal({ opened, onClose, installed, ...rest }: Props) {
+  const { t: tExt } = useExtTranslations();
   // Keep what the modal was opened for while it animates closed, so the refresh that follows an
   // install cannot flip it into "switch version" mode on the way out.
   const [openedFor, setOpenedFor] = useState(installed);
@@ -276,10 +407,22 @@ export default function InstallPluginModal({ opened, onClose, installed, ...rest
         <Group gap='sm' wrap='nowrap'>
           <PluginIcon url={rest.project.iconUrl} name={rest.project.title} size={36} />
           <Stack gap={0}>
-            <Text fw={600}>{openedFor ? `Switch ${rest.project.title} version` : `Install ${rest.project.title}`}</Text>
+            <Text fw={600}>
+              {openedFor
+                ? tExt('pages.server.plugins.install.switchTitle', { plugin: rest.project.title })
+                : tExt('pages.server.plugins.install.title', { plugin: rest.project.title })}
+            </Text>
             <Text size='xs' c='dimmed' component='div'>
               {openedFor ? (
-                `Installed: ${openedFor.version?.versionNumber ?? openedFor.fileName}${openedFor.enabled ? '' : ' (disabled)'}`
+                openedFor.enabled ? (
+                  tExt('pages.server.plugins.install.current', {
+                    version: openedFor.version?.versionNumber ?? openedFor.fileName,
+                  })
+                ) : (
+                  tExt('pages.server.plugins.install.currentDisabled', {
+                    version: openedFor.version?.versionNumber ?? openedFor.fileName,
+                  })
+                )
               ) : (
                 <ProviderMark source={rest.project.source} />
               )}

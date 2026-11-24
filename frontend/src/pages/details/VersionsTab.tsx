@@ -16,13 +16,15 @@ import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import FormattedTimestamp from '@/elements/time/FormattedTimestamp.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import { bytesToString } from '@/lib/format/size.ts';
-import type { PluginVersion, VersionChannel } from '../../lib/catalog.ts';
 import type { InstalledPlugin } from '../../lib/plugins.ts';
-import ChannelBadge, { CHANNEL_LABELS } from '../../components/ChannelBadge.tsx';
+import ChannelBadge from '../../components/ChannelBadge.tsx';
 import LoaderBadge from '../../components/LoaderBadge.tsx';
+import { useLoaderOptions } from '../../components/useLoaderOptions.ts';
+import { fileAvailability, fileFor, type PluginVersion, type VersionChannel } from '../../lib/catalog.ts';
 import { formatCount, newestFirst } from '../../lib/format.ts';
-import { isPluginLoader, loaderSelectData, type PluginLoader, runsOn } from '../../lib/loaders.ts';
+import { isPluginLoader, loaderLabel, type PluginLoader, runsOn } from '../../lib/loaders.ts';
 import { useDetection } from '../../lib/queries.ts';
+import { useExtTranslations } from '../../translations.ts';
 
 const PER_PAGE = 15;
 const SHOWN_GAME_VERSIONS = 3;
@@ -37,16 +39,19 @@ interface Props {
 }
 
 export default function VersionsTab({ versions, loading, error, installed, onInstall }: Props) {
+  const { t: tExt } = useExtTranslations();
   const { data: detection } = useDetection();
 
   const detectedLoader = detection?.loader ?? null;
-  const detectedVersion = detection?.minecraftVersion ?? null;
+  const detectedVersion = detection?.versionApplicable ? (detection.minecraftVersion?.value ?? null) : null;
   const canMatch = !!detectedLoader || !!detectedVersion;
+  const loaderOptions = useLoaderOptions(detectedLoader);
 
   const [search, setSearch] = useState('');
   const [loaderFilter, setLoaderFilter] = useState<PluginLoader | null>(null);
   const [gameVersionFilter, setGameVersionFilter] = useState<string | null>(null);
-  const [channel, setChannel] = useState<VersionChannel | null>(null);
+  // Release versions only by default; beta and alpha builds are one click away.
+  const [channel, setChannel] = useState<VersionChannel | null>('release');
   // Showing only builds for the detected server is the default.
   const [compatibleChoice, setCompatibleChoice] = useState(true);
   const [page, setPage] = useState(1);
@@ -94,7 +99,7 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
       <Group gap='sm' wrap='wrap'>
         <TextInput
           style={{ flex: 1, minWidth: 200 }}
-          placeholder='Search versions…'
+          placeholder={tExt('pages.server.plugins.versions.searchPlaceholder', {})}
           leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
           value={search}
           onChange={(event) => changeFilter(setSearch)(event.target.value)}
@@ -102,19 +107,19 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
         <Select
           w={170}
           clearable
-          placeholder='All loaders'
+          placeholder={tExt('pages.server.plugins.common.anyLoader', {})}
           value={loader}
           disabled={compatible}
           onChange={changeFilter((value: string | null) =>
             setLoaderFilter(value && isPluginLoader(value) ? value : null),
           )}
-          data={loaderSelectData(detectedLoader)}
+          data={loaderOptions}
         />
         <Select
           w={200}
           clearable
           searchable
-          placeholder='All game versions'
+          placeholder={tExt('pages.server.plugins.common.anyVersion', {})}
           value={gameVersion}
           disabled={compatible}
           onChange={changeFilter(setGameVersionFilter)}
@@ -128,13 +133,16 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
           value={channel ?? ALL}
           onChange={changeFilter((value: string) => setChannel(value === ALL ? null : (value as VersionChannel)))}
           data={[
-            { value: ALL, label: 'All' },
-            ...(['release', 'beta', 'alpha'] as const).map((value) => ({ value, label: CHANNEL_LABELS[value] })),
+            ...(['release', 'beta', 'alpha'] as const).map((value) => ({
+              value,
+              label: tExt(`pages.server.plugins.channel.${value}`, {}),
+            })),
+            { value: ALL, label: tExt('pages.server.plugins.versions.allChannels', {}) },
           ]}
         />
         {canMatch && (
           <Switch
-            label='Compatible only'
+            label={tExt('pages.server.plugins.versions.compatibleOnly', {})}
             checked={compatible}
             onChange={(event) => changeFilter(setCompatibleChoice)(event.currentTarget.checked)}
           />
@@ -142,16 +150,44 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
       </Group>
 
       <Table
-        columns={['Version', 'Type', 'Game versions', 'Loaders', 'Published', 'Downloads', 'Size', '']}
+        columns={[
+          tExt('pages.server.plugins.versions.columns.version', {}),
+          tExt('pages.server.plugins.versions.columns.channel', {}),
+          tExt('pages.server.plugins.versions.columns.gameVersions', {}),
+          tExt('pages.server.plugins.versions.columns.loaders', {}),
+          tExt('pages.server.plugins.versions.columns.published', {}),
+          tExt('pages.server.plugins.versions.columns.downloads', {}),
+          tExt('pages.server.plugins.versions.columns.size', {}),
+          '',
+        ]}
         loading={loading}
         error={error}
         pagination={pagination}
         onPageSelect={setPage}
-        empty={<EmptyState flush icon={faCodeBranch} title='No versions match the filters' description='' />}
+        empty={
+          <EmptyState
+            flush
+            icon={faCodeBranch}
+            title={tExt('pages.server.plugins.versions.empty', {})}
+            description=''
+          />
+        }
       >
         {pagination.data.map((version) => {
           const isInstalled = installed?.version?.id === version.id;
-          const downloadable = !!version.file?.url;
+          const file = fileFor(version, detectedLoader);
+          const availability = fileAvailability(version.source, file);
+          const wrongPlatform = !!detectedLoader && !runsOn(version.loaders, detectedLoader);
+          const blocked = wrongPlatform
+            ? tExt('pages.server.plugins.install.blocked.wrongPlatform', {
+                platforms: version.loaders.map(loaderLabel).join(', '),
+                server: detectedLoader ? loaderLabel(detectedLoader) : '',
+              })
+            : availability === 'none'
+              ? tExt('pages.server.plugins.install.blocked.noFile', {})
+              : availability === 'external'
+                ? tExt('pages.server.plugins.install.blocked.external', {})
+                : null;
 
           return (
             <TableRow key={version.id}>
@@ -163,7 +199,12 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
                     </Text>
                     {isInstalled && (
                       <Badge color='green' variant='filled' size='xs'>
-                        Installed
+                        {tExt('pages.server.plugins.status.installed', {})}
+                      </Badge>
+                    )}
+                    {(availability === 'manual' || availability === 'external') && (
+                      <Badge color='orange' variant='light' size='xs'>
+                        {tExt(`pages.server.plugins.availability.${availability}`, {})}
                       </Badge>
                     )}
                   </Group>
@@ -204,27 +245,22 @@ export default function VersionsTab({ versions, loading, error, installed, onIns
                 <FormattedTimestamp timestamp={version.published} />
               </TableData>
               <TableData>{formatCount(version.downloads)}</TableData>
-              <TableData>{version.file && version.file.size > 0 ? bytesToString(version.file.size) : '—'}</TableData>
+              <TableData>{file && file.size > 0 ? bytesToString(file.size) : '—'}</TableData>
               <TableData>
                 <Group gap='xs' justify='flex-end' wrap='nowrap'>
                   {!isInstalled && (
                     <ServerCan action='files.create'>
-                      <ConditionalTooltip
-                        enabled={!downloadable}
-                        label={
-                          version.file
-                            ? 'The author does not allow this version to be downloaded outside CurseForge.'
-                            : 'This version has no jar to install.'
-                        }
-                      >
+                      <ConditionalTooltip enabled={!!blocked} label={blocked ?? ''}>
                         <Button
                           size='xs'
                           variant='light'
-                          disabled={!downloadable}
+                          disabled={!!blocked}
                           leftSection={<FontAwesomeIcon icon={installed ? faCodeBranch : faDownload} />}
                           onClick={() => onInstall(version.id)}
                         >
-                          {installed ? 'Switch' : 'Install'}
+                          {installed
+                            ? tExt('pages.server.plugins.actions.switch', {})
+                            : tExt('pages.server.plugins.actions.install', {})}
                         </Button>
                       </ConditionalTooltip>
                     </ServerCan>

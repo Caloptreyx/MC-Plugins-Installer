@@ -36,22 +36,31 @@ import InstallPluginModal from '../components/InstallPluginModal.tsx';
 import LoaderBadge from '../components/LoaderBadge.tsx';
 import PluginIcon from '../components/PluginIcon.tsx';
 import ProviderMark from '../components/ProviderMark.tsx';
-import { FOLLOW_LABELS, type PluginSource, projectKey, SOURCE_LABELS } from '../lib/catalog.ts';
+import { useErrorMessage } from '../components/useErrorMessage.ts';
+import { isPluginSource, type PluginSource, projectKey, SOURCE_LABELS } from '../lib/catalog.ts';
+import { safeHref } from '../lib/fileRules.ts';
 import { formatCount } from '../lib/format.ts';
 import { useInstalledPlugins, useProject, useProjectVersions } from '../lib/queries.ts';
 import { pluginDetailsUrl, pluginsUrl } from '../lib/routes.ts';
+import { useExtTranslations } from '../translations.ts';
 import RichText from './details/RichText.tsx';
 import VersionsTab from './details/VersionsTab.tsx';
 
 const TABS = ['description', 'versions'] as const;
 type Tab = (typeof TABS)[number];
 
-const LINK_ICONS: Record<string, IconDefinition> = {
-  Source: faCode,
-  Issues: faBug,
-  Wiki: faBook,
-  Discord: faDiscord,
+const KNOWN_LINKS = ['source', 'issues', 'wiki', 'discord'] as const;
+type KnownLink = (typeof KNOWN_LINKS)[number];
+
+const LINK_ICONS: Record<KnownLink, IconDefinition> = {
+  source: faCode,
+  issues: faBug,
+  wiki: faBook,
+  discord: faDiscord,
 };
+
+const knownLink = (label: string): KnownLink | null =>
+  KNOWN_LINKS.find((known) => known === label.toLowerCase()) ?? null;
 
 function Stat({ icon, label, children }: { icon: IconDefinition; label: string; children: ReactNode }) {
   return (
@@ -67,13 +76,15 @@ function Stat({ icon, label, children }: { icon: IconDefinition; label: string; 
 }
 
 export default function PluginDetailsPage() {
+  const { t: tExt } = useExtTranslations();
   const params = useParams<'source' | 'projectId' | 'tab'>();
-  const source: PluginSource = params.source === 'curseforge' ? 'curseforge' : 'modrinth';
+  const source: PluginSource = isPluginSource(params.source) ? params.source : 'modrinth';
   const projectId = params.projectId ?? '';
   const tab: Tab = TABS.find((value) => value === params.tab) ?? 'description';
   const serverId = useServerStore((state) => state.server.uuidShort);
   const navigate = useNavigate();
   const location = useLocation();
+  const errorMessage = useErrorMessage();
 
   const project = useProject(source, projectId);
   const versions = useProjectVersions(source, projectId);
@@ -84,6 +95,7 @@ export default function PluginDetailsPage() {
 
   const data = project.data;
   const installed = data ? (byProject.get(projectKey(data.source, data.id)) ?? null) : null;
+  const projectUrl = data ? safeHref(data.url) : null;
 
   const goBack = () => {
     if (location.key !== 'default') navigate(-1);
@@ -91,18 +103,21 @@ export default function PluginDetailsPage() {
   };
 
   return (
-    <ServerContentContainer title={data?.title ?? 'Plugin'} contentRight={<DetectionBadges />}>
+    <ServerContentContainer
+      title={data?.title ?? tExt('pages.server.plugins.details.fallbackTitle', {})}
+      contentRight={<DetectionBadges />}
+    >
       <Stack gap='md'>
         <DetectionAlert />
 
         <Group>
           <Button variant='subtle' color='gray' leftSection={<FontAwesomeIcon icon={faArrowLeft} />} onClick={goBack}>
-            Back to plugins
+            {tExt('pages.server.plugins.details.back', {})}
           </Button>
         </Group>
 
         {project.error ? (
-          <Alert color='red'>{project.error.message}</Alert>
+          <Alert color='red'>{errorMessage(project.error)}</Alert>
         ) : !data ? (
           <Center py='xl'>
             <Spinner />
@@ -118,14 +133,16 @@ export default function PluginDetailsPage() {
                       <Title order={2}>{data.title}</Title>
                       {installed && (
                         <Badge color={installed.enabled ? 'green' : 'gray'} variant='filled'>
-                          {installed.enabled ? 'Installed' : 'Disabled'}
+                          {installed.enabled
+                            ? tExt('pages.server.plugins.status.installed', {})
+                            : tExt('pages.server.plugins.status.disabled', {})}
                         </Badge>
                       )}
                     </Group>
                     <Group gap='xs'>
                       {data.author && (
                         <Text size='sm' c='dimmed'>
-                          by {data.author}
+                          {tExt('pages.server.plugins.common.byAuthor', { author: data.author })}
                         </Text>
                       )}
                       <Text size='sm' c='dimmed' component='div'>
@@ -154,12 +171,17 @@ export default function PluginDetailsPage() {
                       leftSection={<FontAwesomeIcon icon={installed ? faCodeBranch : faDownload} />}
                       onClick={() => setInstallVersionId(null)}
                     >
-                      {installed ? 'Switch version' : 'Install'}
+                      {installed
+                        ? tExt('pages.server.plugins.actions.switchVersion', {})
+                        : tExt('pages.server.plugins.actions.install', {})}
                     </Button>
                   </ServerCan>
-                  <Anchor href={data.url} target='_blank' rel='noopener noreferrer' size='sm' ta='center'>
-                    <FontAwesomeIcon icon={faArrowUpRightFromSquare} /> Open on {SOURCE_LABELS[data.source]}
-                  </Anchor>
+                  {projectUrl && (
+                    <Anchor href={projectUrl} target='_blank' rel='noopener noreferrer' size='sm' ta='center'>
+                      <FontAwesomeIcon icon={faArrowUpRightFromSquare} />{' '}
+                      {tExt('pages.server.plugins.details.openOn', { source: SOURCE_LABELS[data.source] })}
+                    </Anchor>
+                  )}
                 </Stack>
               </Group>
 
@@ -167,30 +189,35 @@ export default function PluginDetailsPage() {
 
               <Group justify='space-between' wrap='wrap' gap='lg'>
                 <Group gap='xl' wrap='wrap'>
-                  <Stat icon={faDownload} label='Downloads'>
+                  <Stat icon={faDownload} label={tExt('pages.server.plugins.details.downloads', {})}>
                     {formatCount(data.downloads)}
                   </Stat>
-                  <Stat icon={faHeart} label={FOLLOW_LABELS[data.source]}>
+                  <Stat icon={faHeart} label={tExt(`pages.server.plugins.details.follows.${data.source}`, {})}>
                     {formatCount(data.follows)}
                   </Stat>
                   {data.updated && (
-                    <Stat icon={faClock} label='Updated'>
+                    <Stat icon={faClock} label={tExt('pages.server.plugins.details.updated', {})}>
                       <FormattedTimestamp timestamp={data.updated} />
                     </Stat>
                   )}
                   {data.license && (
-                    <Stat icon={faScaleBalanced} label='License'>
+                    <Stat icon={faScaleBalanced} label={tExt('pages.server.plugins.details.license', {})}>
                       {data.license}
                     </Stat>
                   )}
                 </Group>
                 {data.links.length > 0 && (
                   <Group gap='sm'>
-                    {data.links.map((link) => (
-                      <Anchor key={link.url} href={link.url} target='_blank' rel='noopener noreferrer' size='sm'>
-                        <FontAwesomeIcon icon={LINK_ICONS[link.label] ?? faGlobe} /> {link.label}
-                      </Anchor>
-                    ))}
+                    {data.links.map((link) => {
+                      const href = safeHref(link.url);
+                      const known = knownLink(link.label);
+                      return href ? (
+                        <Anchor key={link.url} href={href} target='_blank' rel='noopener noreferrer' size='sm'>
+                          <FontAwesomeIcon icon={known ? LINK_ICONS[known] : faGlobe} />{' '}
+                          {known ? tExt(`pages.server.plugins.details.links.${known}`, {}) : link.label}
+                        </Anchor>
+                      ) : null;
+                    })}
                   </Group>
                 )}
               </Group>
@@ -199,9 +226,16 @@ export default function PluginDetailsPage() {
             {installed && (
               <Alert color={installed.enabled ? 'green' : 'gray'}>
                 {installed.version?.versionNumber
-                  ? `Version ${installed.version.versionNumber} is installed on this server`
-                  : 'This plugin is installed on this server'}
-                {installed.enabled ? '.' : ', but disabled.'}
+                  ? installed.enabled
+                    ? tExt('pages.server.plugins.details.installedVersion', {
+                        version: installed.version.versionNumber,
+                      })
+                    : tExt('pages.server.plugins.details.installedVersionDisabled', {
+                        version: installed.version.versionNumber,
+                      })
+                  : installed.enabled
+                    ? tExt('pages.server.plugins.details.installedUnknown', {})
+                    : tExt('pages.server.plugins.details.installedUnknownDisabled', {})}
               </Alert>
             )}
 
@@ -215,7 +249,7 @@ export default function PluginDetailsPage() {
               }
             >
               <Tabs.List>
-                <Tabs.Tab value='description'>Description</Tabs.Tab>
+                <Tabs.Tab value='description'>{tExt('pages.server.plugins.details.tabs.description', {})}</Tabs.Tab>
                 <Tabs.Tab
                   value='versions'
                   rightSection={
@@ -226,7 +260,7 @@ export default function PluginDetailsPage() {
                     ) : null
                   }
                 >
-                  Versions
+                  {tExt('pages.server.plugins.details.tabs.versions', {})}
                 </Tabs.Tab>
               </Tabs.List>
 
@@ -235,7 +269,7 @@ export default function PluginDetailsPage() {
                   {data.body.trim() ? (
                     <RichText content={data.body} format={data.bodyFormat} />
                   ) : (
-                    <Text c='dimmed'>This plugin has no description.</Text>
+                    <Text c='dimmed'>{tExt('pages.server.plugins.details.noDescription', {})}</Text>
                   )}
                 </Card>
               </Tabs.Panel>
@@ -243,7 +277,7 @@ export default function PluginDetailsPage() {
                 <VersionsTab
                   versions={versions.data ?? []}
                   loading={versions.isPending}
-                  error={versions.error?.message ?? null}
+                  error={versions.error ? errorMessage(versions.error) : null}
                   installed={installed}
                   onInstall={setInstallVersionId}
                 />
@@ -253,7 +287,13 @@ export default function PluginDetailsPage() {
             <InstallPluginModal
               opened={installVersionId !== undefined}
               onClose={() => setInstallVersionId(undefined)}
-              project={{ source: data.source, id: data.id, title: data.title, iconUrl: data.iconUrl }}
+              project={{
+                source: data.source,
+                id: data.id,
+                slug: data.slug,
+                title: data.title,
+                iconUrl: data.iconUrl,
+              }}
               installed={installed}
               initialVersionId={installVersionId}
             />

@@ -1,16 +1,18 @@
 import {
   faArrowsRotate,
+  faArrowUp,
   faBoxOpen,
   faCircleInfo,
   faCodeBranch,
   faCompass,
   faMagnifyingGlass,
   faTrash,
+  faTriangleExclamation,
 } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { Stack } from '@mantine/core';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { httpErrorToHuman } from '@/api/axios.ts';
 import ActionIcon from '@/elements/buttons/ActionIcon.tsx';
 import Button from '@/elements/buttons/Button.tsx';
 import Badge from '@/elements/data-display/Badge.tsx';
@@ -33,51 +35,81 @@ import InstallPluginModal from '../components/InstallPluginModal.tsx';
 import PluginIcon from '../components/PluginIcon.tsx';
 import PluginsLayout from '../components/PluginsLayout.tsx';
 import ProviderMark from '../components/ProviderMark.tsx';
+import UpdateAllModal from '../components/UpdateAllModal.tsx';
+import { useErrorMessage } from '../components/useErrorMessage.ts';
+import { fileAvailability, fileFor, type VersionChannel } from '../lib/catalog.ts';
+import { loaderLabel, runsOn } from '../lib/loaders.ts';
 import { deletePlugin, type InstalledPlugin, pluginDisplayName, setPluginEnabled } from '../lib/plugins.ts';
-import { useCurseforgeEnabled, useInstalledPlugins, useRefreshInstalledPlugins } from '../lib/queries.ts';
+import {
+  useCurseforgeEnabled,
+  useDetection,
+  useInstalledPlugins,
+  usePluginUpdates,
+  useRefreshInstalledPlugins,
+} from '../lib/queries.ts';
 import { pluginDetailsUrl, pluginsUrl } from '../lib/routes.ts';
+import { useExtTranslations } from '../translations.ts';
 
 const PER_PAGE = 25;
 
-type StatusFilter = 'all' | 'enabled' | 'disabled';
+type StatusFilter = 'all' | 'enabled' | 'disabled' | 'updates';
+
+const RELEASES: VersionChannel[] = ['release'];
+const ALL_CHANNELS: VersionChannel[] = ['release', 'beta', 'alpha'];
 
 export default function ManagePage() {
+  const { t: tExt, tReact } = useExtTranslations();
   const server = useServerStore((state) => state.server);
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const errorMessage = useErrorMessage();
   const installed = useInstalledPlugins();
+  const detection = useDetection();
   const curseforge = useCurseforgeEnabled();
-  const unknownSourceHint = curseforge.enabled
-    ? 'This jar was not found on Modrinth or CurseForge, so it cannot switch versions.'
-    : 'This jar was not found on Modrinth, so it cannot switch versions.';
   const refresh = useRefreshInstalledPlugins();
   const canRename = useServerCan('files.update');
   const canDelete = useServerCan('files.delete');
+  const canCreate = useServerCan('files.create');
+
+  const [preReleaseUpdates, setPreReleaseUpdates] = useState(false);
+  const updates = usePluginUpdates(preReleaseUpdates ? ALL_CHANNELS : RELEASES);
 
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [page, setPage] = useState(1);
   const [toggling, setToggling] = useState<string | null>(null);
   // Targets outlive their modal's open flag so the content stays intact during the close animation.
-  const [switchTarget, setSwitchTarget] = useState<InstalledPlugin | null>(null);
+  const [switchTarget, setSwitchTarget] = useState<{ plugin: InstalledPlugin; versionId: string | null } | null>(null);
   const [switchOpen, setSwitchOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<InstalledPlugin | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [updateAllOpen, setUpdateAllOpen] = useState(false);
   const [changed, setChanged] = useState(false);
 
-  const plugins = installed.data ?? [];
+  const plugins = installed.plugins ?? [];
   const enabledCount = plugins.filter((plugin) => plugin.enabled).length;
+  const detectedLoader = detection.data?.loader ?? null;
+  const updateMap = updates.data;
+  const pendingUpdates = plugins.flatMap((plugin) => {
+    const version = updateMap?.get(plugin.fileName);
+    return version ? [{ plugin, version }] : [];
+  });
+
+  const unknownSourceHint = curseforge.enabled
+    ? tExt('pages.server.plugins.installed.unknownHintCurseforge', {})
+    : tExt('pages.server.plugins.installed.unknownHint', {});
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return plugins.filter(
       (plugin) =>
-        (status === 'all' || plugin.enabled === (status === 'enabled')) &&
+        (status === 'all' ||
+          (status === 'updates' ? !!updateMap?.has(plugin.fileName) : plugin.enabled === (status === 'enabled'))) &&
         (!needle ||
           pluginDisplayName(plugin).toLowerCase().includes(needle) ||
           plugin.fileName.toLowerCase().includes(needle)),
     );
-  }, [plugins, search, status]);
+  }, [plugins, search, status, updateMap]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   const currentPage = Math.min(page, pageCount);
@@ -91,38 +123,61 @@ export default function ManagePage() {
   const toggle = async (plugin: InstalledPlugin, enabled: boolean) => {
     setToggling(plugin.fileName);
     try {
-      await setPluginEnabled(server.uuid, plugin, enabled);
-      addToast(`${pluginDisplayName(plugin)} ${enabled ? 'enabled' : 'disabled'}.`, 'success');
+      await setPluginEnabled(
+        server.uuid,
+        plugin,
+        enabled,
+        plugins.map((entry) => entry.fileName),
+      );
+      addToast(
+        enabled
+          ? tExt('pages.server.plugins.installed.toast.enabled', { plugin: pluginDisplayName(plugin) })
+          : tExt('pages.server.plugins.installed.toast.disabled', { plugin: pluginDisplayName(plugin) }),
+        'success',
+      );
       setChanged(true);
-      await refresh();
     } catch (error) {
-      addToast(httpErrorToHuman(error), 'error');
+      addToast(errorMessage(error), 'error');
     } finally {
       setToggling(null);
+      await refresh();
     }
   };
 
   const remove = async (plugin: InstalledPlugin) => {
-    await deletePlugin(server.uuid, plugin);
-    addToast(`${pluginDisplayName(plugin)} deleted.`, 'success');
-    setDeleteOpen(false);
-    setChanged(true);
-    await refresh();
+    try {
+      await deletePlugin(server.uuid, plugin);
+      addToast(tExt('pages.server.plugins.installed.toast.deleted', { plugin: pluginDisplayName(plugin) }), 'success');
+      setDeleteOpen(false);
+      setChanged(true);
+    } catch (error) {
+      addToast(errorMessage(error), 'error');
+    } finally {
+      await refresh();
+    }
   };
 
-  if (installed.isSuccess && plugins.length === 0) {
+  const openSwitch = (plugin: InstalledPlugin, versionId: string | null) => {
+    setSwitchTarget({ plugin, versionId });
+    setSwitchOpen(true);
+  };
+
+  const wrongPlatform = (plugin: InstalledPlugin) =>
+    !!plugin.version && !!detectedLoader && !runsOn(plugin.version.loaders, detectedLoader);
+
+  if (installed.isSuccess && plugins.length === 0 && installed.data.leftovers.length === 0) {
     return (
       <PluginsLayout tab='installed'>
         <EmptyState
           icon={faBoxOpen}
-          title='No plugins installed'
-          description='The plugins folder of this server has no plugin jars yet.'
+          title={tExt('pages.server.plugins.installed.empty.title', {})}
+          description={tExt('pages.server.plugins.installed.empty.description', {})}
         >
           <Button
             leftSection={<FontAwesomeIcon icon={faCompass} />}
             onClick={() => navigate(pluginsUrl(server.uuidShort))}
           >
-            Browse plugins
+            {tExt('pages.server.plugins.actions.browse', {})}
           </Button>
         </EmptyState>
       </PluginsLayout>
@@ -131,16 +186,42 @@ export default function ManagePage() {
 
   return (
     <PluginsLayout tab='installed'>
-      {changed && (
-        <Alert color='blue' variant='light' mb='md' icon={<FontAwesomeIcon icon={faCircleInfo} />}>
-          <Text size='sm'>Restart the server to apply plugin changes.</Text>
-        </Alert>
-      )}
+      <Stack gap='md' mb='md'>
+        {changed && (
+          <Alert color='blue' variant='light' icon={<FontAwesomeIcon icon={faCircleInfo} />}>
+            <Text size='sm'>{tExt('pages.server.plugins.installed.restartHint', {})}</Text>
+          </Alert>
+        )}
+        {installed.data && !installed.data.hashed && (
+          <Alert color='gray' variant='light' icon={<FontAwesomeIcon icon={faCircleInfo} />}>
+            <Text size='sm'>{tExt('pages.server.plugins.installed.noReadContent', {})}</Text>
+          </Alert>
+        )}
+        {installed.data && installed.data.leftovers.length > 0 && (
+          <Alert
+            color='yellow'
+            variant='light'
+            icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
+            title={tExt('pages.server.plugins.installed.leftovers.title', {})}
+          >
+            <Text size='sm'>
+              {tExt('pages.server.plugins.installed.leftovers.description', {
+                list: installed.data.leftovers.join(', '),
+              })}
+            </Text>
+          </Alert>
+        )}
+        {updates.isError && (
+          <Alert color='yellow' variant='light'>
+            {tExt('pages.server.plugins.installed.updateCheckFailed', { error: errorMessage(updates.error) })}
+          </Alert>
+        )}
+      </Stack>
 
-      <Group justify='space-between' mb='md'>
-        <Group gap='sm'>
+      <Group justify='space-between' mb='md' wrap='wrap'>
+        <Group gap='sm' wrap='wrap'>
           <TextInput
-            placeholder='Search installed plugins…'
+            placeholder={tExt('pages.server.plugins.installed.searchPlaceholder', {})}
             leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
             value={search}
             onChange={(event) => {
@@ -156,160 +237,251 @@ export default function ManagePage() {
               setPage(1);
             }}
             data={[
-              { value: 'all', label: 'All' },
-              { value: 'enabled', label: 'Enabled' },
-              { value: 'disabled', label: 'Disabled' },
+              { value: 'all', label: tExt('pages.server.plugins.installed.filter.all', {}) },
+              { value: 'enabled', label: tExt('pages.server.plugins.installed.filter.enabled', {}) },
+              { value: 'disabled', label: tExt('pages.server.plugins.installed.filter.disabled', {}) },
+              {
+                value: 'updates',
+                label: tExt('pages.server.plugins.installed.filter.updates', { count: pendingUpdates.length }),
+              },
             ]}
           />
+          <Switch
+            label={tExt('pages.server.plugins.installed.preReleaseUpdates', {})}
+            checked={preReleaseUpdates}
+            onChange={(event) => setPreReleaseUpdates(event.currentTarget.checked)}
+          />
         </Group>
-        <Group gap='sm'>
+        <Group gap='sm' wrap='wrap'>
           {installed.data && (
             <Text size='sm' c='dimmed'>
-              {plugins.length} installed · {enabledCount} enabled · {plugins.length - enabledCount} disabled
+              {tExt('pages.server.plugins.installed.counts', {
+                total: plugins.length,
+                enabled: enabledCount,
+                disabled: plugins.length - enabledCount,
+              })}
             </Text>
+          )}
+          {pendingUpdates.length > 0 && detectedLoader && (
+            <Button
+              variant='light'
+              leftSection={<FontAwesomeIcon icon={faArrowUp} />}
+              disabled={!canCreate || !canDelete}
+              onClick={() => setUpdateAllOpen(true)}
+            >
+              {tExt('pages.server.plugins.installed.updateAll', { count: pendingUpdates.length })}
+            </Button>
           )}
           <Button
             variant='default'
-            leftSection={<FontAwesomeIcon icon={faArrowsRotate} spin={installed.isFetching} />}
+            leftSection={<FontAwesomeIcon icon={faArrowsRotate} spin={installed.isFetching || updates.isFetching} />}
             onClick={() => refresh()}
           >
-            Refresh
+            {tExt('pages.server.plugins.actions.refresh', {})}
           </Button>
           <Button
             leftSection={<FontAwesomeIcon icon={faCompass} />}
             onClick={() => navigate(pluginsUrl(server.uuidShort))}
           >
-            Browse plugins
+            {tExt('pages.server.plugins.actions.browse', {})}
           </Button>
         </Group>
       </Group>
 
       <Table
-        columns={['Plugin', 'Version', 'Source', 'Size', 'Enabled', '']}
+        columns={[
+          tExt('pages.server.plugins.installed.columns.plugin', {}),
+          tExt('pages.server.plugins.installed.columns.version', {}),
+          tExt('pages.server.plugins.installed.columns.source', {}),
+          tExt('pages.server.plugins.installed.columns.size', {}),
+          tExt('pages.server.plugins.installed.columns.enabled', {}),
+          '',
+        ]}
         loading={installed.isPending}
-        error={installed.isError ? installed.error.message : null}
+        error={installed.isError ? errorMessage(installed.error) : null}
         pagination={pagination}
         onPageSelect={setPage}
       >
-        {pagination.data.map((plugin) => (
-          <TableRow key={plugin.fileName}>
-            <TableData>
-              <Group gap='sm' wrap='nowrap'>
-                <PluginIcon url={plugin.project?.iconUrl} name={pluginDisplayName(plugin)} size={36} />
-                <div>
-                  {plugin.project ? (
-                    <Text
-                      fw={500}
-                      className='mcpi-link'
-                      onClick={() =>
-                        navigate(pluginDetailsUrl(server.uuidShort, plugin.project!.source, plugin.project!.id))
-                      }
-                    >
-                      {pluginDisplayName(plugin)}
+        {pagination.data.map((plugin) => {
+          const update = updateMap?.get(plugin.fileName) ?? null;
+          const updateAvailability = update ? fileAvailability(update.source, fileFor(update, detectedLoader)) : null;
+
+          return (
+            <TableRow key={plugin.fileName}>
+              <TableData>
+                <Group gap='sm' wrap='nowrap'>
+                  <PluginIcon url={plugin.project?.iconUrl} name={pluginDisplayName(plugin)} size={36} />
+                  <div style={{ minWidth: 0 }}>
+                    <Group gap={6} wrap='nowrap'>
+                      {plugin.project ? (
+                        <Text
+                          fw={500}
+                          className='mcpi-link'
+                          onClick={() =>
+                            navigate(pluginDetailsUrl(server.uuidShort, plugin.project!.source, plugin.project!.id))
+                          }
+                        >
+                          {pluginDisplayName(plugin)}
+                        </Text>
+                      ) : (
+                        <Text fw={500}>{pluginDisplayName(plugin)}</Text>
+                      )}
+                      {wrongPlatform(plugin) && (
+                        <Tooltip
+                          label={tExt('pages.server.plugins.installed.wrongPlatformHint', {
+                            platforms: plugin.version!.loaders.map(loaderLabel).join(', '),
+                            server: detectedLoader ? loaderLabel(detectedLoader) : '',
+                          })}
+                        >
+                          <Badge size='xs' color='red' variant='light'>
+                            {tExt('pages.server.plugins.installed.wrongPlatform', {})}
+                          </Badge>
+                        </Tooltip>
+                      )}
+                    </Group>
+                    <Text size='xs' c='dimmed'>
+                      {plugin.fileName}
                     </Text>
-                  ) : (
-                    <Text fw={500}>{pluginDisplayName(plugin)}</Text>
-                  )}
-                  <Text size='xs' c='dimmed'>
-                    {plugin.fileName}
-                  </Text>
-                </div>
-              </Group>
-            </TableData>
-            <TableData>
-              {plugin.version ? (
-                <Group gap='xs' wrap='nowrap'>
-                  <Text size='sm' ff='monospace'>
-                    {plugin.version.versionNumber}
-                  </Text>
-                  {plugin.version.channel !== 'release' && <ChannelBadge channel={plugin.version.channel} />}
+                  </div>
                 </Group>
-              ) : (
-                <Text size='sm' c='dimmed'>
-                  —
-                </Text>
-              )}
-            </TableData>
-            <TableData>
-              {plugin.project ? (
-                <Text size='sm' component='div'>
-                  <ProviderMark source={plugin.project.source} />
-                </Text>
-              ) : (
-                <Tooltip label={unknownSourceHint}>
-                  <Badge size='sm' variant='light' color='gray'>
-                    Unknown
-                  </Badge>
-                </Tooltip>
-              )}
-            </TableData>
-            <TableData>
-              <Text size='sm'>{bytesToString(plugin.size)}</Text>
-            </TableData>
-            <TableData>
-              <Switch
-                checked={plugin.enabled}
-                disabled={!canRename || toggling !== null}
-                onChange={(event) => toggle(plugin, event.currentTarget.checked)}
-                aria-label={plugin.enabled ? 'Disable plugin' : 'Enable plugin'}
-              />
-            </TableData>
-            <TableData>
-              <Group gap='xs' justify='flex-end' wrap='nowrap'>
-                <Tooltip label={plugin.project ? 'Switch version' : unknownSourceHint}>
-                  <ActionIcon
-                    variant='subtle'
-                    disabled={!plugin.project}
-                    onClick={() => {
-                      setSwitchTarget(plugin);
-                      setSwitchOpen(true);
-                    }}
-                    aria-label='Switch version'
+              </TableData>
+              <TableData>
+                <Stack gap={4}>
+                  {plugin.version ? (
+                    <Group gap='xs' wrap='nowrap'>
+                      <Text size='sm' ff='monospace'>
+                        {plugin.version.versionNumber}
+                      </Text>
+                      {plugin.version.channel !== 'release' && <ChannelBadge channel={plugin.version.channel} />}
+                    </Group>
+                  ) : (
+                    <Text size='sm' c='dimmed'>
+                      —
+                    </Text>
+                  )}
+                  {update && (
+                    <Group gap={6} wrap='nowrap'>
+                      <Button
+                        size='compact-xs'
+                        variant='light'
+                        color='green'
+                        leftSection={<FontAwesomeIcon icon={faArrowUp} />}
+                        disabled={!canCreate || !canDelete}
+                        onClick={() => openSwitch(plugin, update.id)}
+                      >
+                        {tExt('pages.server.plugins.installed.updateTo', { version: update.versionNumber })}
+                      </Button>
+                      {(updateAvailability === 'manual' || updateAvailability === 'external') && (
+                        <Badge size='xs' color='orange' variant='light'>
+                          {tExt(`pages.server.plugins.availability.${updateAvailability}`, {})}
+                        </Badge>
+                      )}
+                    </Group>
+                  )}
+                </Stack>
+              </TableData>
+              <TableData>
+                {plugin.project ? (
+                  <Text size='sm' component='div'>
+                    <ProviderMark source={plugin.project.source} />
+                  </Text>
+                ) : (
+                  <Tooltip label={unknownSourceHint}>
+                    <Badge size='sm' variant='light' color='gray'>
+                      {tExt('pages.server.plugins.installed.unknown', {})}
+                    </Badge>
+                  </Tooltip>
+                )}
+              </TableData>
+              <TableData>
+                <Text size='sm'>{bytesToString(plugin.size)}</Text>
+              </TableData>
+              <TableData>
+                <Switch
+                  checked={plugin.enabled}
+                  disabled={!canRename || toggling !== null}
+                  onChange={(event) => toggle(plugin, event.currentTarget.checked)}
+                  aria-label={
+                    plugin.enabled
+                      ? tExt('pages.server.plugins.actions.disable', {})
+                      : tExt('pages.server.plugins.actions.enable', {})
+                  }
+                />
+              </TableData>
+              <TableData>
+                <Group gap='xs' justify='flex-end' wrap='nowrap'>
+                  <Tooltip
+                    label={plugin.project ? tExt('pages.server.plugins.actions.switchVersion', {}) : unknownSourceHint}
                   >
-                    <FontAwesomeIcon icon={faCodeBranch} />
-                  </ActionIcon>
-                </Tooltip>
-                <Tooltip label='Delete'>
-                  <ActionIcon
-                    variant='subtle'
-                    color='red'
-                    disabled={!canDelete}
-                    onClick={() => {
-                      setDeleteTarget(plugin);
-                      setDeleteOpen(true);
-                    }}
-                    aria-label='Delete'
-                  >
-                    <FontAwesomeIcon icon={faTrash} />
-                  </ActionIcon>
-                </Tooltip>
-              </Group>
-            </TableData>
-          </TableRow>
-        ))}
+                    <ActionIcon
+                      variant='subtle'
+                      disabled={!plugin.project || !canCreate}
+                      onClick={() => openSwitch(plugin, null)}
+                      aria-label={tExt('pages.server.plugins.actions.switchVersion', {})}
+                    >
+                      <FontAwesomeIcon icon={faCodeBranch} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <Tooltip label={tExt('pages.server.plugins.actions.delete', {})}>
+                    <ActionIcon
+                      variant='subtle'
+                      color='red'
+                      disabled={!canDelete}
+                      onClick={() => {
+                        setDeleteTarget(plugin);
+                        setDeleteOpen(true);
+                      }}
+                      aria-label={tExt('pages.server.plugins.actions.delete', {})}
+                    >
+                      <FontAwesomeIcon icon={faTrash} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+              </TableData>
+            </TableRow>
+          );
+        })}
       </Table>
 
       <InstallPluginModal
         opened={switchOpen}
         onClose={() => setSwitchOpen(false)}
         project={{
-          source: switchTarget?.project?.source ?? 'modrinth',
-          id: switchTarget?.project?.id ?? '',
-          title: switchTarget ? pluginDisplayName(switchTarget) : '',
-          iconUrl: switchTarget?.project?.iconUrl ?? null,
+          source: switchTarget?.plugin.project?.source ?? 'modrinth',
+          id: switchTarget?.plugin.project?.id ?? '',
+          slug: switchTarget?.plugin.project?.slug ?? '',
+          title: switchTarget ? pluginDisplayName(switchTarget.plugin) : '',
+          iconUrl: switchTarget?.plugin.project?.iconUrl ?? null,
         }}
-        installed={switchTarget}
+        installed={switchTarget?.plugin ?? null}
+        initialVersionId={switchTarget?.versionId ?? null}
       />
+
+      {detectedLoader && (
+        <UpdateAllModal
+          key={updateAllOpen ? 'open' : 'closed'}
+          opened={updateAllOpen}
+          onClose={() => setUpdateAllOpen(false)}
+          updates={pendingUpdates}
+          loader={detectedLoader}
+          onDone={() => {
+            setChanged(true);
+            refresh();
+          }}
+        />
+      )}
 
       <ConfirmationModal
         opened={deleteOpen}
         onClose={() => setDeleteOpen(false)}
-        title='Delete plugin'
-        confirm='Delete'
-        onConfirmed={() => remove(deleteTarget!)}
+        title={tExt('pages.server.plugins.installed.deleteModal.title', {})}
+        confirm={tExt('pages.server.plugins.actions.delete', {})}
+        onConfirmed={() => (deleteTarget ? remove(deleteTarget) : undefined)}
       >
         <Text>
-          Delete <b>{deleteTarget?.fileName}</b> from the plugins folder? Its configuration folder is kept.
+          {tReact('pages.server.plugins.installed.deleteModal.content', {
+            file: <b>{deleteTarget?.fileName}</b>,
+          })}
         </Text>
       </ConfirmationModal>
     </PluginsLayout>

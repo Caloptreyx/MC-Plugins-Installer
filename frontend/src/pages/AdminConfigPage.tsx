@@ -18,11 +18,13 @@ import { useAdminCan } from '@/plugins/usePermissions.ts';
 import { useToast } from '@/providers/ToastProvider.tsx';
 import { ProviderDot } from '../components/ProviderMark.tsx';
 import { getAdminSettings, saveCurseforgeKey, verifyCurseforgeKey } from '../lib/admin.ts';
+import { useExtTranslations } from '../translations.ts';
 
 const SETTINGS_KEY = ['dev.caloptreyx.mcplugins', 'admin', 'settings'];
 
 /** Extension configuration page: the CurseForge API key that enables CurseForge as a plugin source. */
 export default function AdminConfigPage() {
+  const { t: tExt, tReact } = useExtTranslations();
   const { addToast } = useToast();
   const queryClient = useQueryClient();
   const canManage = useAdminCan('mcplugins.manage');
@@ -47,12 +49,15 @@ export default function AdminConfigPage() {
     try {
       if (action === 'verify') {
         await verifyCurseforgeKey(apiKey.trim() || undefined);
-        addToast('CurseForge accepted the API key.', 'success');
+        addToast(tExt('admin.curseforge.toast.accepted', {}), 'success');
       } else {
         const saved = await saveCurseforgeKey(action === 'save' ? apiKey.trim() : '');
         queryClient.setQueryData(SETTINGS_KEY, saved);
         setApiKey('');
-        addToast(action === 'save' ? 'CurseForge API key saved.' : 'CurseForge API key removed.', 'success');
+        addToast(
+          action === 'save' ? tExt('admin.curseforge.toast.saved', {}) : tExt('admin.curseforge.toast.removed', {}),
+          'success',
+        );
       }
     } catch (error) {
       addToast(httpErrorToHuman(error), 'error');
@@ -69,23 +74,26 @@ export default function AdminConfigPage() {
       icon={<ProviderDot source='curseforge' />}
       rightSection={
         <Badge variant='light' color={configured ? 'green' : 'gray'}>
-          {configured ? 'Enabled' : 'Not configured'}
+          {configured ? tExt('admin.curseforge.enabled', {}) : tExt('admin.curseforge.notConfigured', {})}
         </Badge>
       }
     >
       <Stack gap='md'>
         <Text size='sm'>
-          Plugins from Modrinth are always available. To also offer CurseForge&apos;s Bukkit plugins, enter a CurseForge
-          API key from the{' '}
-          <Anchor href='https://console.curseforge.com/' target='_blank' rel='noopener noreferrer'>
-            CurseForge for Studios console
-          </Anchor>
-          . The key is stored encrypted and is never sent to users.
+          {tReact('admin.curseforge.description', {
+            console: (
+              <Anchor href='https://console.curseforge.com/' target='_blank' rel='noopener noreferrer'>
+                {tExt('admin.curseforge.console', {})}
+              </Anchor>
+            ),
+          })}
         </Text>
 
         <PasswordInput
-          label={configured ? 'Replace API key' : 'API key'}
-          placeholder={configured ? 'Leave empty to keep the stored key' : 'Paste your CurseForge API key'}
+          label={configured ? tExt('admin.curseforge.replaceKey', {}) : tExt('admin.curseforge.key', {})}
+          placeholder={
+            configured ? tExt('admin.curseforge.keepPlaceholder', {}) : tExt('admin.curseforge.pastePlaceholder', {})
+          }
           value={apiKey}
           onChange={(event) => setApiKey(event.currentTarget.value)}
           disabled={!canManage}
@@ -98,7 +106,7 @@ export default function AdminConfigPage() {
             disabled={!canManage || !apiKey.trim() || busy !== null}
             onClick={() => run('save')}
           >
-            Save
+            {tExt('admin.curseforge.save', {})}
           </Button>
           <Button
             variant='default'
@@ -107,7 +115,7 @@ export default function AdminConfigPage() {
             disabled={!canManage || (!apiKey.trim() && !configured) || busy !== null}
             onClick={() => run('verify')}
           >
-            {apiKey.trim() ? 'Test this key' : 'Test stored key'}
+            {apiKey.trim() ? tExt('admin.curseforge.testKey', {}) : tExt('admin.curseforge.testStoredKey', {})}
           </Button>
           {configured && (
             <Button
@@ -118,7 +126,7 @@ export default function AdminConfigPage() {
               disabled={!canManage || busy !== null}
               onClick={() => run('remove')}
             >
-              Remove key
+              {tExt('admin.curseforge.removeKey', {})}
             </Button>
           )}
         </Group>

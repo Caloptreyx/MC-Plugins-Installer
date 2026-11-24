@@ -8,9 +8,10 @@ import Card from '@/elements/data-display/Card.tsx';
 import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import FormattedTimestamp from '@/elements/time/FormattedTimestamp.tsx';
 import Text from '@/elements/typography/Text.tsx';
+import type { PluginSummary } from '../lib/catalog.ts';
 import type { InstalledPlugin } from '../lib/plugins.ts';
-import { FOLLOW_LABELS, type PluginSummary } from '../lib/catalog.ts';
 import { formatCount, gameVersionRange } from '../lib/format.ts';
+import { useExtTranslations } from '../translations.ts';
 import LoaderBadge from './LoaderBadge.tsx';
 import PluginIcon from './PluginIcon.tsx';
 
@@ -22,6 +23,7 @@ interface Props {
 }
 
 export default function PluginCard({ plugin, installed, onOpen, onInstall }: Props) {
+  const { t: tExt } = useExtTranslations();
   const range = gameVersionRange(plugin.gameVersions);
 
   return (
@@ -37,13 +39,15 @@ export default function PluginCard({ plugin, installed, onOpen, onInstall }: Pro
                 </Text>
                 {installed && (
                   <Badge color={installed.enabled ? 'green' : 'gray'} variant='filled' size='xs'>
-                    {installed.enabled ? 'Installed' : 'Disabled'}
+                    {installed.enabled
+                      ? tExt('pages.server.plugins.status.installed', {})
+                      : tExt('pages.server.plugins.status.disabled', {})}
                   </Badge>
                 )}
               </Group>
               {plugin.author && (
                 <Text size='xs' c='dimmed' truncate>
-                  by {plugin.author}
+                  {tExt('pages.server.plugins.common.byAuthor', { author: plugin.author })}
                 </Text>
               )}
               <Text size='sm' lineClamp={2} mt={4}>
@@ -71,12 +75,18 @@ export default function PluginCard({ plugin, installed, onOpen, onInstall }: Pro
 
         <Group justify='space-between' wrap='nowrap'>
           <Group gap='md' wrap='nowrap'>
-            <Tooltip label={`${plugin.downloads.toLocaleString()} downloads`}>
+            <Tooltip
+              label={tExt('pages.server.plugins.common.downloadsCount', { count: plugin.downloads.toLocaleString() })}
+            >
               <Text size='xs' c='dimmed'>
                 <FontAwesomeIcon icon={faDownload} /> {formatCount(plugin.downloads)}
               </Text>
             </Tooltip>
-            <Tooltip label={`${plugin.follows.toLocaleString()} ${FOLLOW_LABELS[plugin.source]}`}>
+            <Tooltip
+              label={tExt(`pages.server.plugins.common.followsCount.${plugin.source}`, {
+                count: plugin.follows.toLocaleString(),
+              })}
+            >
               <Text size='xs' c='dimmed'>
                 <FontAwesomeIcon icon={faHeart} /> {formatCount(plugin.follows)}
               </Text>
@@ -98,7 +108,7 @@ export default function PluginCard({ plugin, installed, onOpen, onInstall }: Pro
                   onInstall();
                 }}
               >
-                Install
+                {tExt('pages.server.plugins.actions.install', {})}
               </Button>
             </ServerCan>
           )}

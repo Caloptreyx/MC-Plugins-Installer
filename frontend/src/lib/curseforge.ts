@@ -2,11 +2,15 @@ import { z } from 'zod';
 import { axiosInstance } from '@/api/axios.ts';
 import { parseFromApi, parsePaginationFromApi } from '@/lib/serialization/api-transform.ts';
 import type { CategoryOption, PluginProject, PluginSummary, PluginVersion, SearchParams } from './catalog.ts';
+import { isAllowedDownload } from './fileRules.ts';
 
 // CurseForge needs an API key, so it is reached through this extension's backend, which returns
 // data already shaped like the shared plugin model.
 
 const base = (serverUuid: string) => `/api/client/servers/${serverUuid}/mcplugins/curseforge`;
+
+/** The backend accepts at most this many fingerprints per request. */
+const FINGERPRINT_BATCH = 500;
 
 const summarySchema = z.object({
   id: z.string(),
@@ -35,11 +39,19 @@ const versionSchema = z.object({
   name: z.string(),
   versionNumber: z.string(),
   channel: z.enum(['release', 'beta', 'alpha']),
-  loaders: z.array(z.string()),
   gameVersions: z.array(z.string()),
   downloads: z.number(),
   published: z.string(),
-  file: z.object({ url: z.string().nullable(), filename: z.string(), size: z.number() }),
+  file: z
+    .object({
+      url: z.string().nullable(),
+      filename: z.string(),
+      size: z.number(),
+      sha1: z.string().nullable(),
+      fingerprint: z.string().nullable(),
+    })
+    .nullable(),
+  dependencies: z.array(z.object({ projectId: z.string(), kind: z.enum(['required', 'optional', 'incompatible']) })),
 });
 
 const categorySchema = z.object({ id: z.string(), name: z.string() });
@@ -48,6 +60,7 @@ const matchSchema = z.object({
   fingerprint: z.number(),
   project: summarySchema,
   version: versionSchema,
+  latestFiles: z.array(versionSchema),
 });
 
 // The "Bukkit Plugins" class is all CurseForge offers for servers.
@@ -57,7 +70,30 @@ const toSummary = (summary: z.infer<typeof summarySchema>): PluginSummary => ({
   ...summary,
 });
 
-const toVersion = (version: z.infer<typeof versionSchema>): PluginVersion => ({ source: 'curseforge', ...version });
+function toVersion(version: z.infer<typeof versionSchema>): PluginVersion {
+  const { file, ...rest } = version;
+  return {
+    ...rest,
+    source: 'curseforge',
+    loaders: ['bukkit'],
+    file: file && {
+      url: file.url && isAllowedDownload('curseforge', file.url) ? file.url : null,
+      externalUrl: null,
+      filename: file.filename,
+      size: file.size,
+      hashes: file.sha1 ? { sha1: file.sha1 } : {},
+      fingerprint: file.fingerprint,
+    },
+    platformFiles: null,
+    dependencies: version.dependencies.map((dependency) => ({
+      projectId: dependency.projectId,
+      name: null,
+      kind: dependency.kind,
+      externalUrl: null,
+      platform: null,
+    })),
+  };
+}
 
 /** Whether an administrator configured CurseForge. */
 export async function getStatus(serverUuid: string): Promise<boolean> {
@@ -88,7 +124,7 @@ export async function getProject(serverUuid: string, id: string): Promise<Plugin
     body: project.body,
     bodyFormat: 'html',
     license: null,
-    links: project.links,
+    links: project.links.map((link) => ({ label: link.label.toLowerCase(), url: link.url })),
   };
 }
 
@@ -102,20 +138,35 @@ export async function getCategories(serverUuid: string): Promise<CategoryOption[
   return data.categories.map((category: unknown) => parseFromApi(categorySchema, category));
 }
 
+export interface FingerprintMatch {
+  version: PluginVersion;
+  project: PluginSummary;
+  /** The project's newest files (per game version), newest first. */
+  latestFiles: PluginVersion[];
+}
+
 /** Identifies jars by CurseForge fingerprint; unknown fingerprints are absent from the result. */
 export async function identifyByFingerprints(
   serverUuid: string,
   fingerprints: string[],
-): Promise<Map<string, { version: PluginVersion; project: PluginSummary }>> {
-  const matches = new Map<string, { version: PluginVersion; project: PluginSummary }>();
-  if (fingerprints.length === 0) return matches;
-
-  const { data } = await axiosInstance.post(`${base(serverUuid)}/fingerprints`, {
-    fingerprints: fingerprints.map(Number),
-  });
-  for (const raw of data.matches) {
-    const match = parseFromApi(matchSchema, raw);
-    matches.set(String(match.fingerprint), { version: toVersion(match.version), project: toSummary(match.project) });
+): Promise<Map<string, FingerprintMatch>> {
+  const matches = new Map<string, FingerprintMatch>();
+  for (let start = 0; start < fingerprints.length; start += FINGERPRINT_BATCH) {
+    const { data } = await axiosInstance.post(`${base(serverUuid)}/fingerprints`, {
+      fingerprints: fingerprints.slice(start, start + FINGERPRINT_BATCH).map(Number),
+    });
+    for (const raw of data.matches) {
+      const match = parseFromApi(matchSchema, raw);
+      matches.set(String(match.fingerprint), {
+        version: toVersion(match.version),
+        project: toSummary(match.project),
+        latestFiles: match.latestFiles.map(toVersion),
+      });
+    }
   }
   return matches;
 }
+
+/** The CurseForge page of one file, where users download files that can't be installed from here. */
+export const curseforgeFileUrl = (slug: string, fileId: string) =>
+  `https://www.curseforge.com/minecraft/bukkit-plugins/${encodeURIComponent(slug)}/files/${encodeURIComponent(fileId)}`;
