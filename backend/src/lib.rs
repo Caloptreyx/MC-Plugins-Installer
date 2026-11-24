@@ -1,6 +1,9 @@
-//! Modrinth is queried straight from the browser. CurseForge needs an API key, so its lookups go
-//! through the routes here, which keep the key on the server. Installing, enabling, disabling and
-//! deleting plugins use the panel's own file endpoints.
+//! Modrinth is queried straight from the browser. CurseForge needs an API key and Hangar results
+//! are checked and cached, so their lookups go through the routes here, which keep the key on the
+//! server and only hand out downloads from each source's own CDN. The backend also lists the jars
+//! in `plugins/` with hashes Wings computes in batches, and checks the hash of a newly installed
+//! file against the one its source published. Installing, enabling, disabling and deleting
+//! plugins use the panel's own file endpoints.
 
 use indexmap::IndexMap;
 use shared::{
@@ -13,9 +16,12 @@ use shared::{
 };
 use std::sync::Arc;
 
+mod common;
 mod curseforge;
+mod hangar;
 mod routes;
 mod settings;
+mod wings;
 
 #[derive(Default)]
 pub struct ExtensionStruct;
@@ -35,7 +41,7 @@ impl Extension for ExtensionStruct {
                 )
             })
             .add_client_server_api_router(|router| {
-                router.nest("/mcplugins/curseforge", routes::server::router(&state))
+                router.nest("/mcplugins", routes::server::router(&state))
             })
     }
 

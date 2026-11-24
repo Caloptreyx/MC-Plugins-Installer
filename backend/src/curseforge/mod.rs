@@ -3,6 +3,7 @@
 
 pub mod model;
 
+use crate::common::CACHE_PREFIX;
 use axum::http::StatusCode;
 use model::{
     BUKKIT_PLUGINS_CLASS_ID, Category, Envelope, FingerprintMatches, Mod, Paged, PluginProject,
@@ -10,7 +11,11 @@ use model::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use shared::{State, models::Pagination, response::DisplayError};
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+    time::Duration,
+};
 use utoipa::ToSchema;
 
 const API: &str = "https://api.curseforge.com";
@@ -24,6 +29,8 @@ const MAX_FILES: i64 = 1_000;
 const CACHE_TTL: u64 = 300;
 /// Seconds categories are cached for.
 const LONG_CACHE_TTL: u64 = 6 * 60 * 60;
+/// Seconds a fingerprint lookup is cached for, matched or not.
+const FINGERPRINT_CACHE_TTL: u64 = 24 * 60 * 60;
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -39,23 +46,26 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 pub fn user_error(message: impl Into<String>, status: StatusCode) -> anyhow::Error {
-    DisplayError::new(message.into()).with_status(status).into()
+    DisplayError::new(message.into())
+        .with_status(status)
+        .into()
+}
+
+fn unreachable_error(err: reqwest::Error) -> anyhow::Error {
+    tracing::warn!("CurseForge request failed: {err:#}");
+    user_error("CurseForge is unreachable", StatusCode::BAD_GATEWAY)
 }
 
 async fn fetch_json<T: DeserializeOwned>(
     request: reqwest::RequestBuilder,
 ) -> Result<T, anyhow::Error> {
-    let response = request.send().await.map_err(|err| {
-        user_error(
-            format!("CurseForge is unreachable: {err}"),
-            StatusCode::BAD_GATEWAY,
-        )
-    })?;
+    let response = request.send().await.map_err(unreachable_error)?;
 
     match response.status() {
         status if status.is_success() => response.json::<T>().await.map_err(|err| {
+            tracing::warn!("unexpected CurseForge response: {err:#}");
             user_error(
-                format!("unexpected response from CurseForge: {err}"),
+                "unexpected response from CurseForge",
                 StatusCode::BAD_GATEWAY,
             )
         }),
@@ -63,17 +73,19 @@ async fn fetch_json<T: DeserializeOwned>(
             Err(user_error("not found on CurseForge", StatusCode::NOT_FOUND))
         }
         status @ (reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) => {
+            tracing::warn!(%status, "CurseForge rejected the API key");
             Err(user_error(
-                format!(
-                    "CurseForge rejected the request (HTTP {status}), check the configured API key"
-                ),
+                "CurseForge rejected the request, check the configured API key",
                 StatusCode::BAD_GATEWAY,
             ))
         }
-        status => Err(user_error(
-            format!("CurseForge returned HTTP {status}"),
-            StatusCode::BAD_GATEWAY,
-        )),
+        status => {
+            tracing::warn!(%status, "CurseForge returned an error");
+            Err(user_error(
+                format!("CurseForge returned HTTP {}", status.as_u16()),
+                StatusCode::BAD_GATEWAY,
+            ))
+        }
     }
 }
 
@@ -165,7 +177,7 @@ pub async fn search(
     }
 
     let cache_key = format!(
-        "mcplugins::curseforge::search::{}",
+        "{CACHE_PREFIX}::curseforge::search::{}",
         params
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
@@ -180,7 +192,7 @@ pub async fn search(
                 fetch_json(get(key, "/v1/mods/search").query(&params)).await?;
             Ok::<_, anyhow::Error>((
                 response.pagination.total_count.min(MAX_SEARCH_WINDOW),
-                response.data.into_iter().map(model::summarize).collect(),
+                response.data.iter().map(model::summarize).collect(),
             ))
         })
         .await?;
@@ -197,7 +209,7 @@ pub async fn categories(state: &State, key: &str) -> Result<Vec<Category>, anyho
     state
         .cache
         .cached(
-            "mcplugins::curseforge::categories",
+            &format!("{CACHE_PREFIX}::curseforge::categories"),
             LONG_CACHE_TTL,
             || async {
                 let categories: Envelope<Vec<model::CfCategory>> =
@@ -212,11 +224,15 @@ pub async fn categories(state: &State, key: &str) -> Result<Vec<Category>, anyho
         .await
 }
 
+fn not_a_plugin() -> anyhow::Error {
+    user_error("this project is not a Bukkit plugin", StatusCode::NOT_FOUND)
+}
+
 pub async fn project(state: &State, key: &str, id: i64) -> Result<PluginProject, anyhow::Error> {
     state
         .cache
         .cached(
-            &format!("mcplugins::curseforge::project::{id}"),
+            &format!("{CACHE_PREFIX}::curseforge::project::{id}"),
             CACHE_TTL,
             || async {
                 let (project, description): (Envelope<Mod>, Envelope<String>) = tokio::try_join!(
@@ -224,10 +240,7 @@ pub async fn project(state: &State, key: &str, id: i64) -> Result<PluginProject,
                     fetch_json(get(key, &format!("/v1/mods/{id}/description"))),
                 )?;
                 if project.data.class_id != Some(BUKKIT_PLUGINS_CLASS_ID) {
-                    return Err(user_error(
-                        "this project is not a Bukkit plugin",
-                        StatusCode::NOT_FOUND,
-                    ));
+                    return Err(not_a_plugin());
                 }
                 Ok(model::project_details(project.data, description.data))
             },
@@ -244,59 +257,134 @@ pub async fn versions(
     state
         .cache
         .cached(
-            &format!("mcplugins::curseforge::versions::{id}"),
+            &format!("{CACHE_PREFIX}::curseforge::versions::{id}"),
             CACHE_TTL,
             || async {
-                let mut files = Vec::new();
-                let mut index = 0;
-                loop {
-                    let page: Paged<model::File> =
-                        fetch_json(get(key, &format!("/v1/mods/{id}/files")).query(&[
-                            ("index", index.to_string()),
-                            ("pageSize", FILES_PAGE_SIZE.to_string()),
-                        ]))
-                        .await?;
-                    let received = page.data.len() as i64;
-                    files.extend(page.data);
-                    index += FILES_PAGE_SIZE;
-                    if received < FILES_PAGE_SIZE
-                        || index >= page.pagination.total_count
-                        || index >= MAX_FILES
-                    {
-                        break;
+                let files = async {
+                    let mut files = Vec::new();
+                    let mut index = 0;
+                    loop {
+                        let page: Paged<model::File> =
+                            fetch_json(get(key, &format!("/v1/mods/{id}/files")).query(&[
+                                ("index", index.to_string()),
+                                ("pageSize", FILES_PAGE_SIZE.to_string()),
+                            ]))
+                            .await?;
+                        let received = page.data.len() as i64;
+                        files.extend(page.data);
+                        index += FILES_PAGE_SIZE;
+                        if received < FILES_PAGE_SIZE
+                            || index >= page.pagination.total_count
+                            || index >= MAX_FILES
+                        {
+                            break;
+                        }
                     }
+                    Ok::<_, anyhow::Error>(files)
+                };
+                // The files endpoint doesn't say whether the author allows third-party
+                // downloads, the project does.
+                let (project, files): (Envelope<Mod>, Vec<model::File>) =
+                    tokio::try_join!(fetch_json(get(key, &format!("/v1/mods/{id}"))), files)?;
+                if project.data.class_id != Some(BUKKIT_PLUGINS_CLASS_ID) {
+                    return Err(not_a_plugin());
                 }
 
-                let mut versions: Vec<PluginVersion> = files
-                    .into_iter()
-                    .filter(|file| file.is_server_pack != Some(true))
-                    .map(model::map_file)
-                    .collect();
-                versions.sort_by(|a, b| b.published.cmp(&a.published));
-                Ok::<_, anyhow::Error>(versions)
+                Ok(model::map_files(
+                    files,
+                    project.data.allow_mod_distribution,
+                ))
             },
         )
         .await
 }
 
-#[derive(ToSchema, Serialize)]
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
 pub struct FingerprintMatch {
     pub fingerprint: u64,
     #[schema(inline)]
     pub project: PluginSummary,
     #[schema(inline)]
     pub version: PluginVersion,
+    /// The project's latest files, newest first.
+    #[schema(inline)]
+    pub latest_files: Vec<PluginVersion>,
 }
 
-/// Identifies jars by their CurseForge fingerprint; files that are not Bukkit plugins are left out.
+fn fingerprint_cache_key(fingerprint: u64) -> String {
+    format!("{CACHE_PREFIX}::curseforge::fingerprint::{fingerprint}")
+}
+
+/// Identifies jars by their CurseForge fingerprint; files that are not Bukkit plugins are left
+/// out. Every lookup, matched or not, is cached per fingerprint, so only fingerprints CurseForge
+/// hasn't been asked about lately are sent to it.
 pub async fn match_fingerprints(
+    state: &State,
     key: &str,
     fingerprints: &[u64],
 ) -> Result<Vec<FingerprintMatch>, anyhow::Error> {
-    if fingerprints.is_empty() {
-        return Ok(Vec::new());
+    let mut unique: Vec<u64> = Vec::with_capacity(fingerprints.len());
+    let mut seen = HashSet::with_capacity(fingerprints.len());
+    for fingerprint in fingerprints {
+        if seen.insert(*fingerprint) {
+            unique.push(*fingerprint);
+        }
     }
 
+    let cached = futures_util::future::join_all(unique.iter().map(|fingerprint| async move {
+        let found = state
+            .cache
+            .get::<Option<FingerprintMatch>>(&fingerprint_cache_key(*fingerprint))
+            .await;
+        (*fingerprint, found)
+    }))
+    .await;
+
+    let mut found: HashMap<u64, Option<FingerprintMatch>> = HashMap::with_capacity(unique.len());
+    let mut uncached: Vec<u64> = Vec::new();
+    for (fingerprint, entry) in cached {
+        match entry {
+            Ok(Some(entry)) => {
+                found.insert(fingerprint, entry);
+            }
+            Ok(None) => uncached.push(fingerprint),
+            Err(err) => {
+                tracing::warn!("failed to read a cached CurseForge fingerprint: {err:#}");
+                uncached.push(fingerprint);
+            }
+        }
+    }
+
+    if !uncached.is_empty() {
+        let fresh = lookup_fingerprints(key, &uncached).await?;
+        for fingerprint in uncached {
+            let entry = fresh.get(&fingerprint).cloned();
+            if let Err(err) = state
+                .cache
+                .set(
+                    &fingerprint_cache_key(fingerprint),
+                    FINGERPRINT_CACHE_TTL,
+                    &entry,
+                )
+                .await
+            {
+                tracing::warn!("failed to cache a CurseForge fingerprint: {err:#}");
+            }
+            found.insert(fingerprint, entry);
+        }
+    }
+
+    Ok(unique
+        .into_iter()
+        .filter_map(|fingerprint| found.remove(&fingerprint).flatten())
+        .collect())
+}
+
+/// Asks CurseForge about `fingerprints` and loads the matched projects in one batch.
+async fn lookup_fingerprints(
+    key: &str,
+    fingerprints: &[u64],
+) -> Result<HashMap<u64, FingerprintMatch>, anyhow::Error> {
     let matches: Envelope<FingerprintMatches> = fetch_json(post(
         key,
         &format!("/v1/fingerprints/{MINECRAFT_GAME_ID}"),
@@ -315,7 +403,7 @@ pub async fn match_fingerprints(
         })
         .collect();
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(HashMap::new());
     }
 
     let mut mod_ids: Vec<i64> = files.iter().map(|file| file.mod_id).collect();
@@ -327,25 +415,36 @@ pub async fn match_fingerprints(
         &serde_json::json!({ "modIds": mod_ids }),
     ))
     .await?;
-    let projects: HashMap<i64, PluginSummary> = projects
+    let projects: HashMap<i64, (PluginSummary, Option<bool>, Vec<PluginVersion>)> = projects
         .data
         .into_iter()
         .filter(|project| project.class_id == Some(BUKKIT_PLUGINS_CLASS_ID))
-        .map(|project| (project.id, model::summarize(project)))
+        .map(|mut project| {
+            let summary = model::summarize(&project);
+            let allow_distribution = project.allow_mod_distribution;
+            let latest_files =
+                model::map_files(std::mem::take(&mut project.latest_files), allow_distribution);
+            (project.id, (summary, allow_distribution, latest_files))
+        })
         .collect();
 
-    Ok(files
-        .into_iter()
-        .filter_map(|file| {
-            let fingerprint = file.file_fingerprint?;
-            let project = projects.get(&file.mod_id)?.clone();
-            Some(FingerprintMatch {
-                fingerprint,
-                project,
-                version: model::map_file(file),
-            })
-        })
-        .collect())
+    let mut found = HashMap::new();
+    for file in files {
+        let Some(fingerprint) = file.file_fingerprint else {
+            continue;
+        };
+        let Some((project, allow_distribution, latest_files)) = projects.get(&file.mod_id) else {
+            continue;
+        };
+        found.entry(fingerprint).or_insert_with(|| FingerprintMatch {
+            fingerprint,
+            project: project.clone(),
+            version: model::map_file(file, *allow_distribution),
+            latest_files: latest_files.clone(),
+        });
+    }
+
+    Ok(found)
 }
 
 /// Checks an API key against CurseForge without touching the stored settings.
@@ -353,12 +452,7 @@ pub async fn verify_key(key: &str) -> Result<(), anyhow::Error> {
     let response = get(key, &format!("/v1/games/{MINECRAFT_GAME_ID}"))
         .send()
         .await
-        .map_err(|err| {
-            user_error(
-                format!("CurseForge is unreachable: {err}"),
-                StatusCode::BAD_GATEWAY,
-            )
-        })?;
+        .map_err(unreachable_error)?;
 
     match response.status() {
         status if status.is_success() => Ok(()),
@@ -366,9 +460,12 @@ pub async fn verify_key(key: &str) -> Result<(), anyhow::Error> {
             "CurseForge rejected the API key",
             StatusCode::BAD_REQUEST,
         )),
-        status => Err(user_error(
-            format!("CurseForge returned HTTP {status}"),
-            StatusCode::BAD_GATEWAY,
-        )),
+        status => {
+            tracing::warn!(%status, "CurseForge returned an error while checking a key");
+            Err(user_error(
+                format!("CurseForge returned HTTP {}", status.as_u16()),
+                StatusCode::BAD_GATEWAY,
+            ))
+        }
     }
 }

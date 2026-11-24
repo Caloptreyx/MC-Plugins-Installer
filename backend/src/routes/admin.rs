@@ -87,13 +87,13 @@ mod put_settings {
         activity_logger: GetAdminActivityLogger,
         shared::Payload(data): shared::Payload<Payload>,
     ) -> ApiResponseResult {
+        permissions.has_admin_permission("mcplugins.manage")?;
+
         if let Err(errors) = shared::utils::validate_data(&data) {
             return ApiResponse::new_serialized(ApiError::new_strings_value(errors))
                 .with_status(StatusCode::BAD_REQUEST)
                 .ok();
         }
-
-        permissions.has_admin_permission("mcplugins.manage")?;
 
         // a pasted key with a trailing newline is not a valid header value
         let key = data.curseforge_api_key.trim();
@@ -148,13 +148,22 @@ mod verify {
         permissions: GetPermissionManager,
         shared::Payload(data): shared::Payload<Payload>,
     ) -> ApiResponseResult {
+        permissions.has_admin_permission("mcplugins.manage")?;
+        state
+            .cache
+            .ratelimit(
+                "mcplugins/admin/curseforge-verify",
+                10,
+                60,
+                permissions.user_uuid().to_string(),
+            )
+            .await?;
+
         if let Err(errors) = shared::utils::validate_data(&data) {
             return ApiResponse::new_serialized(ApiError::new_strings_value(errors))
                 .with_status(StatusCode::BAD_REQUEST)
                 .ok();
         }
-
-        permissions.has_admin_permission("mcplugins.manage")?;
 
         let key = match data
             .api_key
