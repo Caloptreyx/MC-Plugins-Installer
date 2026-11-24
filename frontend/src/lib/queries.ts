@@ -59,13 +59,16 @@ export function useCurseforgeEnabled() {
 export function useInstalledPlugins() {
   const uuid = useServerStore((state) => state.server.uuid);
   const curseforge = useCurseforgeEnabled();
+  const detection = useDetection();
+  const loader = detection.data?.loader ?? null;
 
   const query = useQuery({
-    queryKey: [...pluginQueryKeys.installed(uuid), curseforge.enabled],
-    queryFn: () => loadInstalledPlugins(uuid, curseforge.enabled),
+    queryKey: [...pluginQueryKeys.installed(uuid), curseforge.enabled, loader],
+    queryFn: () => loadInstalledPlugins(uuid, curseforge.enabled, loader),
     staleTime: 60 * 1000,
-    // Identification depends on whether CurseForge can be asked, so wait until that is known.
-    enabled: !curseforge.isPending,
+    // Identification depends on whether CurseForge can be asked and on the server platform (to pick the right
+    // Modrinth version of a file published for several platforms), so wait until both are known.
+    enabled: !curseforge.isPending && !detection.isPending,
   });
 
   const byProject = useMemo(() => {

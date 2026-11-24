@@ -340,6 +340,17 @@ export async function versionWithFile(sha1: string): Promise<PluginVersion | nul
   return mapped.file?.hashes.sha1 === sha1 ? mapped : null;
 }
 
+/**
+ * Every version of `projectId` that publishes the file with this SHA-1. Authors often attach the same jar to several
+ * versions (one per platform), while the hash lookup returns only one of them.
+ */
+export async function versionsWithFile(projectId: string, sha1: string): Promise<PluginVersion[]> {
+  const versions = await request<Version[]>(`/project/${encodeURIComponent(projectId)}/version`);
+  return versions
+    .filter((version) => version.files.some((file) => file.hashes.sha1 === sha1))
+    .map((version) => mapVersion(version, sha1));
+}
+
 /** Minecraft release versions, newest first. */
 export async function getReleaseGameVersions(): Promise<string[]> {
   const versions = await request<{ version: string; version_type: string }[]>('/tag/game_version');

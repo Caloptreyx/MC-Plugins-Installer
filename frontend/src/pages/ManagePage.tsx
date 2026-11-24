@@ -39,7 +39,13 @@ import UpdateAllModal from '../components/UpdateAllModal.tsx';
 import { useErrorMessage } from '../components/useErrorMessage.ts';
 import { fileAvailability, fileFor, type VersionChannel } from '../lib/catalog.ts';
 import { loaderLabel, runsOn } from '../lib/loaders.ts';
-import { deletePlugin, type InstalledPlugin, pluginDisplayName, setPluginEnabled } from '../lib/plugins.ts';
+import {
+  deletePlugin,
+  duplicateFiles,
+  type InstalledPlugin,
+  pluginDisplayName,
+  setPluginEnabled,
+} from '../lib/plugins.ts';
 import {
   useCurseforgeEnabled,
   useDetection,
@@ -89,6 +95,7 @@ export default function ManagePage() {
   const plugins = installed.plugins ?? [];
   const enabledCount = plugins.filter((plugin) => plugin.enabled).length;
   const detectedLoader = detection.data?.loader ?? null;
+  const duplicates = useMemo(() => duplicateFiles(plugins), [plugins]);
   const updateMap = updates.data;
   const pendingUpdates = plugins.flatMap((plugin) => {
     const version = updateMap?.get(plugin.fileName);
@@ -312,7 +319,7 @@ export default function ManagePage() {
                 <Group gap='sm' wrap='nowrap'>
                   <PluginIcon url={plugin.project?.iconUrl} name={pluginDisplayName(plugin)} size={36} />
                   <div style={{ minWidth: 0 }}>
-                    <Group gap={6} wrap='nowrap'>
+                    <Group gap={6} wrap='wrap'>
                       {plugin.project ? (
                         <Text
                           fw={500}
@@ -335,6 +342,13 @@ export default function ManagePage() {
                         >
                           <Badge size='xs' color='red' variant='light'>
                             {tExt('pages.server.plugins.installed.wrongPlatform', {})}
+                          </Badge>
+                        </Tooltip>
+                      )}
+                      {duplicates.has(plugin.fileName) && (
+                        <Tooltip label={tExt('pages.server.plugins.installed.duplicateHint', {})}>
+                          <Badge size='xs' color='red' variant='light'>
+                            {tExt('pages.server.plugins.installed.duplicate', {})}
                           </Badge>
                         </Tooltip>
                       )}

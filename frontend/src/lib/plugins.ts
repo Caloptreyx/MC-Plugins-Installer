@@ -8,7 +8,8 @@ import type { InstalledRecord } from './stateFormat.ts';
 import { identifyByFingerprints } from './curseforge.ts';
 import { DISABLED_SUFFIX, jarNameOf } from './fileRules.ts';
 import * as hangar from './hangar.ts';
-import { identifyByHashes } from './modrinth.ts';
+import { isPluginLoader, type PluginLoader, runsOn } from './loaders.ts';
+import { identifyByHashes, versionsWithFile } from './modrinth.ts';
 import { forgetInstalled, readStateFile } from './stateFile.ts';
 
 export const PLUGINS_DIRECTORY = '/plugins';
@@ -61,10 +62,16 @@ const listingSchema = z.object({
 export const pluginDisplayName = (plugin: InstalledPlugin) =>
   plugin.project?.title ?? plugin.jarName.replace(/\.jar$/i, '');
 
-/** Hangar has no hash lookup: jars are recognised by the record written when they were installed from here. */
-async function identifyHangar(uuid: string, records: InstalledRecord[], unknown: InstalledPlugin[]) {
-  const matched = unknown.flatMap((plugin) => {
-    const record = records.find((entry) => plugin.sha256 && entry.sha256 === plugin.sha256);
+/**
+ * Hangar has no hash lookup: jars are recognised by the record written when they were installed from here (same jar
+ * name and SHA-256). Checked first, so a Hangar jar whose file Modrinth also publishes still shows as Hangar.
+ */
+async function identifyHangar(uuid: string, records: InstalledRecord[], plugins: InstalledPlugin[]) {
+  const matched = plugins.flatMap((plugin) => {
+    const record = records.find(
+      (entry) =>
+        plugin.sha256 && entry.sha256 === plugin.sha256 && entry.file.toLowerCase() === plugin.jarName.toLowerCase(),
+    );
     return record ? [{ plugin, record }] : [];
   });
 
@@ -94,11 +101,39 @@ async function identifyHangar(uuid: string, records: InstalledRecord[], unknown:
   }
 }
 
+/** Whether a version runs on the server (or, while the server platform is unknown, on any plugin platform). */
+const fitsServer = (version: PluginVersion, loader: PluginLoader | null) =>
+  loader ? runsOn(version.loaders, loader) : version.loaders.some(isPluginLoader);
+
 /**
- * Plugin jars in the server's plugins folder, hashed by this extension's backend. Jars are identified on Modrinth by
- * SHA-1, then on CurseForge by fingerprint (when configured), then by Hangar install records.
+ * The hash lookup returns one version per file, but authors attach the same jar to several versions (e.g. one for
+ * Fabric and one for Paper/Velocity). When that one doesn't fit the server, use another version with the same file.
  */
-export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: boolean): Promise<InstalledPlugins> {
+async function pickFittingModrinthVersions(plugins: InstalledPlugin[], loader: PluginLoader | null) {
+  const misfits = plugins.filter(
+    (plugin) => plugin.version?.source === 'modrinth' && plugin.sha1 && !fitsServer(plugin.version, loader),
+  );
+  await Promise.all(
+    misfits.map(async (plugin) => {
+      const alternatives = await versionsWithFile(plugin.version!.projectId, plugin.sha1!).catch(
+        (): PluginVersion[] => [],
+      );
+      const fitting = alternatives.find((version) => fitsServer(version, loader));
+      if (fitting) plugin.version = fitting;
+    }),
+  );
+}
+
+/**
+ * Plugin jars in the server's plugins folder, hashed by this extension's backend. Jars are identified by Hangar install
+ * records, then on Modrinth by SHA-1, then on CurseForge by fingerprint (when configured). `loader` is the server's
+ * platform, used to pick the right Modrinth version when one file is published for several platforms.
+ */
+export async function loadInstalledPlugins(
+  uuid: string,
+  curseforgeEnabled: boolean,
+  loader: PluginLoader | null,
+): Promise<InstalledPlugins> {
   const { data } = await axiosInstance.get(`/api/client/servers/${uuid}/mcplugins/plugins`);
   const listing = parseFromApi(listingSchema, data);
 
@@ -118,11 +153,18 @@ export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: bool
   }));
 
   if (listing.hashed) {
-    const onModrinth = await identifyByHashes(plugins.flatMap((plugin) => (plugin.sha1 ? [plugin.sha1] : [])));
-    for (const plugin of plugins) {
-      const match = plugin.sha1 ? onModrinth.get(plugin.sha1) : undefined;
+    const records = await readStateFile(uuid)
+      .then(({ state }) => state.installed)
+      .catch((): InstalledRecord[] => []);
+    if (records.length > 0) await identifyHangar(uuid, records, plugins);
+
+    const forModrinth = plugins.filter((plugin) => !plugin.project && plugin.sha1);
+    const onModrinth = await identifyByHashes(forModrinth.map((plugin) => plugin.sha1!));
+    for (const plugin of forModrinth) {
+      const match = onModrinth.get(plugin.sha1!);
       if (match) Object.assign(plugin, match);
     }
+    await pickFittingModrinthVersions(plugins, loader);
 
     if (curseforgeEnabled) {
       const unknown = plugins.filter((plugin) => !plugin.project && plugin.fingerprint);
@@ -135,14 +177,6 @@ export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: bool
         if (match) Object.assign(plugin, match);
       }
     }
-
-    const unknown = plugins.filter((plugin) => !plugin.project);
-    if (unknown.length > 0) {
-      const records = await readStateFile(uuid)
-        .then(({ state }) => state.installed)
-        .catch((): InstalledRecord[] => []);
-      if (records.length > 0) await identifyHangar(uuid, records, unknown);
-    }
   }
 
   return {
@@ -150,6 +184,24 @@ export async function loadInstalledPlugins(uuid: string, curseforgeEnabled: bool
     leftovers: listing.leftovers,
     hashed: listing.hashed,
   };
+}
+
+/**
+ * Enabled jars of a plugin that has more than one enabled jar (the same project, or the same title from another
+ * source): the server refuses to load a plugin twice. Keyed by file name.
+ */
+export function duplicateFiles(plugins: InstalledPlugin[]): Set<string> {
+  const byTitle = new Map<string, InstalledPlugin[]>();
+  for (const plugin of plugins) {
+    if (!plugin.project || !plugin.enabled) continue;
+    const key = plugin.project.title.trim().toLowerCase();
+    byTitle.set(key, [...(byTitle.get(key) ?? []), plugin]);
+  }
+  return new Set(
+    [...byTitle.values()]
+      .filter((group) => group.length > 1)
+      .flatMap((group) => group.map((plugin) => plugin.fileName)),
+  );
 }
 
 /** Core file routes skip files on a subuser's ignore list and report 0 instead of failing. */
