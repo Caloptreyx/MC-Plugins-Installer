@@ -1,71 +1,162 @@
 # MC Plugins Installer
 
 An easy-to-use Minecraft plugin installer and manager for the [Calagopus Panel](https://github.com/calagopus/panel).
-Plugins come from [Modrinth](https://modrinth.com) and, once an administrator adds an API key,
-[CurseForge](https://www.curseforge.com/minecraft/bukkit-plugins). The pages follow the look of the Modpack Installer
-extension.
+Plugins come from [Modrinth](https://modrinth.com), [Hangar](https://hangar.papermc.io) (PaperMC's plugin repository)
+and, once an administrator adds an API key, [CurseForge](https://www.curseforge.com/minecraft/bukkit-plugins). The
+extension works on its own: it needs no other extension.
 
 ## Features
 
-- **Browse** — search plugins in a card grid with a Modrinth/CurseForge switch, filters for Plugin Loader, Minecraft
-  version and category, and a sort order. The **Match server** switch (on by default) narrows results to the
-  detected loader and Minecraft version. Filters live in the URL, so a filtered view can be bookmarked or shared.
-- **Installed** — every jar in the server's `plugins/` folder in a searchable table, identified on Modrinth and
-  CurseForge by file hash. Enable or disable plugins, switch their version, or delete them.
-- **Plugin details** — description, stats, links, and a Versions table with pagination and filters (search, loader,
-  Minecraft version, release channel, and a **Compatible only** switch that is on by default).
-- **Install / switch modal** — pick the loader, Minecraft version and plugin version. Loader and Minecraft version
-  default to what was detected on the server; incompatible choices are flagged before installing.
-- **Detection badges** show the detected Plugin Loader and Minecraft version, and an alert explains what to do when
-  either cannot be detected.
+- **Browse**: search plugins in a card grid with a Modrinth / CurseForge / Hangar switch, filters for Plugin Loader,
+  Minecraft version and category, and a sort order. The **Match server** switch (on by default) narrows results to the
+  detected platform and Minecraft version. Filters live in the URL, so a filtered view can be bookmarked or shared.
+- **Installed**: every jar in the server's `plugins/` folder (`.jar` in any case, and disabled `.jar.disabled`) in a
+  searchable table, identified by file hash. Enable or disable plugins, switch their version, update them, or delete
+  them. Jars built for another platform are flagged **Wrong platform**.
+- **Updates**: identified plugins show **Update to x.y** when a newer release runs on the server (beta updates behind
+  the **Include beta updates** switch). The **Updates** filter lists them, and **Update all** shows a review list
+  first and then updates one plugin at a time.
+- **Plugin details**: description, stats, links, and a Versions table with pagination and filters (search, loader,
+  Minecraft version, release channel, and a **Compatible only** switch). Release versions are shown by default.
+- **Install / switch modal**: picks the plugin version for the detected platform and Minecraft version (beta and
+  alpha versions behind a switch) and offers to install the plugin's **required dependencies** as well. Builds for
+  another platform can't be installed: the button says why.
+- **Server software panel**: the detected software, Minecraft version and build or loader version, where each came
+  from and how sure the detection is, the evidence it found and any conflicts. **Set manually…** stores an override;
+  **Clear override** removes it.
+- All texts are translatable.
+
+### Sources
+
+| Source | Plugins | Identification of installed jars | Download check |
+|---|---|---|---|
+| Modrinth | all plugin loaders | SHA-1 | SHA-512 |
+| CurseForge | the "Bukkit Plugins" section (Bukkit, Spigot, Paper, Purpur and hybrids) | CurseForge fingerprint | CurseForge fingerprint |
+| Hangar | Paper (and Folia when the project supports it), Velocity, Waterfall | install record (see below) | SHA-256 |
+
+- Modrinth is queried straight from the browser. CurseForge and Hangar go through this extension's backend, which
+  caches results (search, projects and versions for 5 minutes, CurseForge categories for 6 hours, CurseForge
+  fingerprint matches for 24 hours) and limits requests per user.
+- Hangar has no lookup by hash. When a plugin is installed from Hangar, the extension records its file name, SHA-256,
+  project and version in `/.mc-plugins-installer.json`, and uses that record to recognise and update the jar later.
+  Hangar jars installed by other means show as unknown.
+- Hangar versions hosted outside Hangar are marked **External download** and are not installed from the panel.
+- CurseForge authors can disallow third-party downloads. Such versions are marked **Manual download**. If Modrinth
+  publishes the identical file (same SHA-1), the modal offers **Install the identical file from Modrinth**. Otherwise it
+  links to the file on CurseForge and offers **Upload the .jar**: the upload is checked against the file's CurseForge
+  fingerprint before it is moved into `plugins/`, and anything else is removed again.
 
 ### Supported platforms
 
-Paper, Purpur, Folia, Spigot, Bukkit, Sponge, and the Velocity, BungeeCord and Waterfall proxies. Forks see their
-parent's plugins (Purpur also shows Paper, Spigot and Bukkit plugins; Waterfall also shows BungeeCord plugins). Folia
-only shows Folia-compatible builds. Proxies are not tied to a Minecraft version, so no version is detected for them.
+Paper, Purpur, Folia, Spigot, Bukkit, Sponge, the hybrids Mohist, Arclight and Youer, and the Velocity, BungeeCord and
+Waterfall proxies. What each shows:
 
-CurseForge only has a "Bukkit Plugins" section. Its plugins are offered for Bukkit, Spigot, Paper and Purpur servers;
-on other platforms the CurseForge tab explains that and points to Modrinth.
+- Purpur: Purpur, Paper, Spigot and Bukkit plugins; Paper: Paper, Spigot and Bukkit plugins.
+- Folia: only Folia-compatible builds.
+- Hybrids: Spigot and Bukkit plugins.
+- Velocity: Velocity plugins; Waterfall: Waterfall and BungeeCord plugins; BungeeCord: BungeeCord plugins. Proxies have
+  no Minecraft-version filter.
+
+Servers that run a mod loader (Fabric, Quilt, Forge, NeoForge), vanilla, or no Minecraft at all get a short "This
+server doesn't run a plugin platform" page with what was detected and the override button instead of the plugin
+pages. The panel can't hide a sidebar entry per server, so to hide **Plugins** on such servers, hide the page for those
+eggs in the egg configuration.
 
 ### How detection works
 
-The Plugin Loader is read, in order, from:
+Detection runs in the browser and reads the server's files through the panel's own file routes. Each value (software,
+Minecraft version, build or loader version) is taken from the highest-ranked source that has it:
 
-1. the brand in `version_history.json` (older Paper-family builds, e.g. `git-Purpur-2062`);
-2. config files the platform generates on first start (`purpur.yml`, `velocity.toml`, `waterfall.yml`,
-   `modules.yml`, `config/paper-global.yml`, `paper.yml`, `spigot.yml`, `bukkit.yml`, `config/sponge/`);
-3. the egg name, startup command, `SERVER_JARFILE` variable and Docker image. A name that is a fork of the file
-   match wins (a Folia egg with Paper's config files is detected as Folia).
+1. **Manual override** in `/.mc-plugins-installer.json` (see below).
+2. **Launch arguments**: `unix_args.txt`, `run.sh` and the `@libraries/.../unix_args.txt` file it points to, and the
+   Forge shim jar name.
+3. **`logs/latest.log` and `version_history.json`**, but only if they are newer than the newest install artifact
+   (server jars, loader libraries, `unix_args.txt`, install markers). An older log or history is from before the last
+   software change: it drops to rank 6 with low confidence and the panel says the log is older than the install.
+4. **Install markers** other tools may leave on the server: `.mcvc-type.json` and `.modpack-installer.json` (optional;
+   used only when present).
+5. **Files**: config files the platform writes (`purpur.yml`, `config/paper-global.yml`, `paper.yml`, `spigot.yml`,
+   `bukkit.yml`, `velocity.toml`, `waterfall.yml`, `modules.yml`, `config/sponge/`) count only when they are not older
+   than the server jar, so a leftover `purpur.yml` no longer makes a Paper server "Purpur"; Folia and the hybrids are
+   recognised from jar names and their own folders; mod loaders from their library folders (the newest wins); the
+   Minecraft version from the newest `versions/` folder.
+6. A stale log (low confidence).
+7. **Startup variables** (non-secret, user-viewable ones; needs `startup.read`).
+8. **Egg name**, then nest name, startup command and Docker image.
 
-The Minecraft version is read, in order, from `version_history.json`, the `Starting minecraft server version` line
-of `logs/latest.log`, the `versions/` folder Paperclip extracts, and finally the `MINECRAFT_VERSION`, `MC_VERSION`,
-`VERSION` or `MINECRAFT_VER` startup variable (release versions only, not `latest`).
+The Paper / Purpur / Folia build comes from `version_history.json` (`1.21.4-232-main@…` or the older
+`git-Paper-196 (MC: 1.20.1)`), proxy versions from the log. Snapshots and pre-releases (`26.3-pre-2`, `24w14a`) are
+recognised. Sources of ranks 2 to 5 that disagree are listed as conflicts.
 
-If nothing matches — typically on a server that has never been started — the badges read "Not detected" and an alert
-asks you to start the server once and detect again. You can still pick the loader and version by hand.
+If nothing matches, typically on a server that has never been started, an alert asks you to start the server once
+or set the software manually. You can still pick the loader yourself when installing.
+
+### Manual override
+
+**Set manually…** in the Server software panel writes `/.mc-plugins-installer.json` in the server root:
+
+```json
+{
+  "override": { "software": "folia", "minecraftVersion": "1.21.4", "loaderVersion": null },
+  "setAt": "2026-11-24T10:00:00.000Z"
+}
+```
+
+`software` is one of `vanilla paper purpur folia spigot bukkit sponge fabric quilt forge neoforge mohist arclight
+youer velocity bungeecord waterfall`. The same file holds the Hangar install records (`installed`). The override wins
+over everything else; when fresh files disagree with it, the panel shows a warning. **Clear override** removes it
+(the file is deleted when nothing else is left in it). An invalid or oversized file (over 64 KiB) is ignored and noted
+in the evidence.
 
 ### How plugins are managed
 
-- Plugins are downloaded by the node straight from Modrinth or CurseForge's CDN into `plugins/` using the panel's
-  file pull.
-- Installed jars are identified by SHA-1 on Modrinth and, for the rest, by CurseForge fingerprint.
-- Some CurseForge authors do not allow third-party downloads. Those versions are marked **CurseForge only** and
-  cannot be installed from the panel; download them from CurseForge and upload them yourself.
-- Disabling renames `Plugin.jar` to `Plugin.jar.disabled`; enabling renames it back.
-- Switching versions downloads the new jar first and only then removes the old one; if both versions share a file
-  name the old jar is kept as a backup until the download succeeds. A disabled plugin stays disabled.
+- Plugins are downloaded by the node straight from the source's CDN into `plugins/` with the panel's file pull. Only
+  `https` downloads from `cdn.modrinth.com`, `edge.forgecdn.net`, `mediafilez.forgecdn.net` and
+  `hangarcdn.papermc.io` are used, and the file name must be a plain `.jar` name.
+- After every download the extension's backend fingerprints the new file and compares it with the checksum the source
+  publishes. A file that doesn't match is deleted and the previous version is restored.
+- Switching or updating to a jar with the same file name first renames the old jar to `<name>.backup`, then downloads
+  and checks the new one, then deletes the backup; if anything fails the backup is renamed back. With a different file
+  name the new jar is downloaded and checked first and the old jar deleted afterwards; if that delete fails, the panel
+  names the file to delete (two copies of a plugin stop it from loading). Leftover `.backup` or upload files are
+  listed on the Installed page. A disabled plugin stays disabled.
+- Disabling renames `Plugin.jar` to `Plugin.jar.disabled`; enabling renames it back (refused when `Plugin.jar` already
+  exists).
+- The panel allows 5 downloads per minute per server. When that limit is hit the panel says how long to wait.
 - Deleting removes the jar only; the plugin's data folder is left alone.
 - Changes take effect after the server restarts.
 
 ### Permissions
 
-The **Plugins** page needs the `files.read-content` server permission (detection and identification read and hash
-files). Installing needs `files.create`, enabling/disabling needs `files.update`, and switching versions or deleting
-needs `files.delete`. `startup.read` is used, when available, to read startup variables during detection.
+| Action | Server permission |
+|---|---|
+| See the Plugins pages, browse, list installed jars | `files.read` |
+| Identify installed jars, check updates, read logs and config files for detection, read the override | `files.read-content` (without it these parts are skipped) |
+| Read startup variables for detection | `startup.read` (optional) |
+| Install, check a download, upload a CurseForge jar, set the override | `files.create` |
+| Enable/disable, switch with the same file name, set the override | `files.update` |
+| Switch, update, delete, clear the override | `files.delete` |
+
+Files hidden from a subuser by the server's ignore list stay hidden: they are not listed, hashed or changed.
 
 The extension adds the admin permissions `mcplugins.read` (view the settings) and `mcplugins.manage` (change the
 CurseForge API key).
+
+### Backend routes
+
+All client routes are under `/api/client/servers/{server}/mcplugins` and are rate limited per user.
+
+| Method | Path | Permission | Purpose |
+|---|---|---|---|
+| GET | `/plugins` | `files.read` | jars in `plugins/` with SHA-1, SHA-256 and CurseForge fingerprints (hashes need `files.read-content`) |
+| POST | `/verify` | `files.create` | `{ file, algorithm, expected }` → `{ matches }` for one file in `plugins/` |
+| GET | `/curseforge/status`, `/curseforge/search`, `/curseforge/categories` | `files.read` | CurseForge availability, search, categories |
+| GET | `/curseforge/projects/{project}`, `/curseforge/projects/{project}/versions` | `files.read` | CurseForge project and files |
+| POST | `/curseforge/fingerprints` | `files.read` | identify up to 500 fingerprints |
+| GET | `/hangar/search`, `/hangar/projects/{project}`, `/hangar/projects/{project}/versions` | `files.read` | Hangar search, project and versions |
+
+Admin routes: `GET`/`PUT /api/admin/extensions/dev.caloptreyx.mcplugins/settings` and
+`POST /api/admin/extensions/dev.caloptreyx.mcplugins/curseforge/verify`.
 
 ## Screenshots
 
@@ -91,8 +182,9 @@ CurseForge API key).
 2. In the panel go to **Admin → Extensions → MC Plugins Installer**, paste the key, use **Test this key**, then
    **Save**.
 
-The key is stored encrypted in the panel settings and never sent to users; CurseForge requests go through this
-extension's backend. Without a key only Modrinth is offered.
+The key is stored encrypted in the panel settings, is never sent to users and never logged (the activity log only
+records whether a key is set); CurseForge requests go through this extension's backend. Without a key, Modrinth and
+Hangar are offered.
 
 ## Requirements
 
@@ -128,14 +220,16 @@ Metadata.toml             extension metadata (package name, panel version requir
 backend/src/lib.rs        routes, admin permissions and settings registration
 backend/src/settings.rs   encrypted CurseForge API key
 backend/src/curseforge/   CurseForge API client and mapping onto the shared plugin model
+backend/src/hangar/       Hangar API client and mapping
 backend/src/routes/       /api/admin/extensions/dev.caloptreyx.mcplugins/* and
-                          /api/client/servers/{server}/mcplugins/curseforge/*
+                          /api/client/servers/{server}/mcplugins/* (sources, installed jars, download check)
 frontend/src/index.tsx    registers the /plugins, /plugins/installed and
                           /plugins/project/:source/:projectId/:tab? server routes and the admin page
-frontend/src/lib/         source-agnostic catalog (Modrinth in the browser, CurseForge via the backend),
-                          detection, plugin file operations, React Query hooks
-frontend/src/components/  shared UI (provider marks, loader/channel badges, detection badges/alert, install modal)
+frontend/src/translations.ts  every user-visible text
+frontend/src/lib/         source clients, detection (detect-core.ts is pure), installs, updates, React Query hooks
+frontend/src/components/  shared UI (badges, server software panel, install modal, dependency list, update review)
 frontend/src/pages/       Browse, Installed, Plugin details and admin configuration pages
+tests/                    node tests for the pure modules (detection, file rules, override file)
 ```
 
 To work on it, set up the [panel development environment](https://calagopus.com/docs/panel/extensions/dev-environment),
@@ -146,6 +240,8 @@ place this repository's `Metadata.toml`, `backend/Cargo.toml` and `backend/src/`
 Before shipping, run from the panel checkout:
 
 ```bash
-cargo fmt && cargo clippy -p dev_caloptreyx_mcplugins
+cargo fmt && cargo clippy -p dev_caloptreyx_mcplugins && cargo test -p dev_caloptreyx_mcplugins
 cd frontend && pnpm fmt && pnpm lint && pnpm build:ci
 ```
+
+and from this repository `node --test "tests/*.test.ts"` (Node 24).
