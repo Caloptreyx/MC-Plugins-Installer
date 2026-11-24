@@ -161,17 +161,23 @@ Admin routes: `GET`/`PUT /api/admin/extensions/dev.caloptreyx.mcplugins/settings
 
 ## Screenshots
 
-**Browse**: Modrinth plugins matched to the detected Paper 1.21.4 server.
+**Browse**: Hangar plugins matched to the detected Paper 1.21.4 server, with the Modrinth / CurseForge / Hangar switch.
 
-![Browse tab with plugin results](docs/screenshots/browse.png)
+![Browse tab with Hangar results](docs/screenshots/browse.png)
 
-**Install modal**: loader and Minecraft version default to what was detected.
+**Install modal**: the plugin loader follows the detected server software; the jar is checked against its published
+checksum after the download.
 
 ![Install LuckPerms modal](docs/screenshots/install-modal.png)
 
-**Installed**: every jar in `plugins/`, identified by hash, with enable, switch version and delete.
+**Installed**: every jar in `plugins/`, identified on Modrinth, CurseForge or Hangar, with updates and the
+"Installed twice" warning.
 
 ![Installed plugins list](docs/screenshots/installed.png)
+
+**Server software**: what was detected, from where, and the manual override.
+
+![Server software panel](docs/screenshots/server-software.png)
 
 **Admin settings**: the optional CurseForge API key.
 
