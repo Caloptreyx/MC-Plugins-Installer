@@ -161,7 +161,7 @@ Admin routes: `GET`/`PUT /api/admin/extensions/dev.caloptreyx.mcplugins/settings
 
 ## Screenshots
 
-**Browse**: Hangar plugins matched to the detected Paper 1.21.4 server, with the Modrinth / CurseForge / Hangar switch.
+**Browse**: Hangar plugins matched to the detected Paper server, with the Modrinth / CurseForge / Hangar switch.
 
 ![Browse tab with Hangar results](docs/screenshots/browse.png)
 
